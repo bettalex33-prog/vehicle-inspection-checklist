@@ -10,9 +10,12 @@ cd -- "$launcher_dir" || {
     exit 1
 }
 
-if ! command -v python3 >/dev/null 2>&1; then
-    printf 'Error: python3 is unavailable. Install Python 3 and try again.\n' >&2
+python_path="/Library/Frameworks/Python.framework/Versions/3.15/bin/python3"
+
+if [ ! -x "$python_path" ]; then
+    echo "Error: Python 3 was not found at $python_path"
+    read -r -p "Press Enter to close..."
     exit 1
 fi
 
-exec python3 "$launcher_dir/gui.py"
+exec "$python_path" "$launcher_dir/gui.py"
