@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 
 from checklist import ALL_ITEMS
+from vehicle_profiles import validate_profile
 
 
 CONDITIONS = ("OK", "Needs attention", "Not inspected")
@@ -64,7 +65,7 @@ def _validate_items(items):
 
 
 def create_inspection_record(vehicle_name, mileage, notes, checklist_data, *,
-                             findings, assessment, timestamp=None):
+                             findings, assessment, timestamp=None, profile=None):
     """Return an independent snapshot with a timezone-aware UTC timestamp."""
     vehicle_name, mileage, notes = validate_vehicle_details(vehicle_name, mileage, notes)
     _validate_items(checklist_data)
@@ -73,7 +74,7 @@ def create_inspection_record(vehicle_name, mileage, notes, checklist_data, *,
         raise ValueError("Timestamp must be timezone-aware.")
     completed = sum(item["complete"] for item in checklist_data.values())
     total = len(checklist_data)
-    return {
+    record = {
         "timestamp": timestamp.astimezone(timezone.utc).isoformat(),
         "vehicle_name": vehicle_name, "mileage": mileage, "notes": notes,
         "items": deepcopy(checklist_data),
@@ -82,12 +83,17 @@ def create_inspection_record(vehicle_name, mileage, notes, checklist_data, *,
         "progress": {"completed": completed, "total": total,
                      "percentage": completed / total * 100},
     }
+    if profile is not None:
+        profile = validate_profile(profile)
+        record["profile_id"] = profile.pop("profile_id")
+        record["profile_snapshot"] = profile
+    return record
 
 
 def validate_history(history):
     """Reject malformed or unsupported history rather than discarding records."""
     if (not isinstance(history, dict) or set(history) != {"schema_version", "inspections"}
-            or type(history["schema_version"]) is not int or history["schema_version"] not in (1, 2)
+            or type(history["schema_version"]) is not int or history["schema_version"] not in (1, 2, 3)
             or not isinstance(history["inspections"], list)):
         raise ValueError("Invalid or unsupported inspection history format.")
     for record in history["inspections"]:
@@ -98,8 +104,10 @@ def validate_history(history):
 def _validate_record(record, *, schema_version):
     base_keys = {"timestamp", "vehicle_name", "mileage", "notes", "items", "progress"}
     allowed = [base_keys]
-    if schema_version == 2:
+    if schema_version >= 2:
         allowed.append(base_keys | {"findings", "assessment"})
+    if schema_version == 3:
+        allowed.append(base_keys | {"findings", "assessment", "profile_id", "profile_snapshot"})
     if not isinstance(record, dict) or set(record) not in allowed:
         raise ValueError("Invalid inspection record.")
     if type(record["mileage"]) is not int or record["mileage"] < 0:
@@ -118,6 +126,11 @@ def _validate_record(record, *, schema_version):
     if "findings" in record:
         validate_findings(record["findings"])
         validate_assessment(record["assessment"])
+    if "profile_id" in record:
+        snapshot = record["profile_snapshot"]
+        if not isinstance(snapshot, dict) or "profile_id" in snapshot:
+            raise ValueError("Invalid profile snapshot.")
+        validate_profile({**snapshot, "profile_id": record["profile_id"]})
     completed = sum(item["complete"] for item in record["items"].values())
     total = len(record["items"])
     expected_progress = {"completed": completed, "total": total,
@@ -154,10 +167,11 @@ def append_inspection(history_path, record):
     """Append via a flushed temporary file and atomic same-directory replacement."""
     path = Path(history_path)
     history = load_history(path)
-    _validate_record(record, schema_version=2)
+    _validate_record(record, schema_version=3)
     if "findings" not in record:
         raise ValueError("New inspections require findings and an assessment.")
-    history["schema_version"] = 2
+    history["schema_version"] = max(history["schema_version"],
+                                    3 if "profile_id" in record else 2)
     history["inspections"].append(deepcopy(record))
     validate_history(history)
     temporary_path = None

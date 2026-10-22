@@ -89,7 +89,7 @@ class TestInspectionHistory(unittest.TestCase):
 
     def test_corrupt_malformed_unsupported_history_never_overwritten(self):
         valid = {"schema_version": 2, "inspections": [self.record()]}
-        invalid = ["broken", "", "[]", '{"schema_version":3,"inspections":[]}',
+        invalid = ["broken", "", "[]", '{"schema_version":4,"inspections":[]}',
                    '{"schema_version":2,"schema_version":1,"inspections":[]}',
                    '{"schema_version":true,"inspections":[]}',
                    '{"schema_version":1,"inspections":{}}']
@@ -235,6 +235,74 @@ class TestInspectionHistory(unittest.TestCase):
         with self.assertRaises(ValueError):
             history.append_inspection(self.path, self.record())
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_profile_snapshots_upgrade_and_independence(self):
+        from vehicle_profiles import create_profile, update_profile, delete_profile
+        profiles_path = self.directory / "vehicle_profiles.json"
+        profile = create_profile(profiles_path, "Unit", "2020", "Ford", "Transit", "42")
+        legacy = self.record()
+        legacy.pop("findings")
+        legacy.pop("assessment")
+        for version, records in ((1, [legacy]), (2, [legacy, self.record()])):
+            original = {"schema_version": version, "inspections": records}
+            self.path.write_text(json.dumps(original, indent=4))
+            before = self.path.read_bytes()
+            self.assertEqual(history.load_history(self.path), original)
+            self.assertEqual(self.path.read_bytes(), before)
+            record = history.create_inspection_record(
+                "Actual inspection", "99", "notes", self.data,
+                findings=history.create_default_findings(), assessment="Ready for service", profile=profile)
+            for target in ("json.dump", "os.fsync", "os.replace"):
+                with patch("inspection_history." + target, side_effect=OSError("failure")):
+                    with self.assertRaises(OSError):
+                        history.append_inspection(self.path, record)
+                self.assertEqual(self.path.read_bytes(), before)
+            history.append_inspection(self.path, record)
+            loaded = history.load_history(self.path)
+            self.assertEqual(loaded["schema_version"], 3)
+            self.assertEqual(loaded["inspections"][:-1], records)
+            self.assertEqual(record["profile_id"], profile["profile_id"])
+            self.assertEqual(record["profile_snapshot"]["mileage"], 42)
+            self.assertEqual((record["vehicle_name"], record["mileage"]), ("Actual inspection", 99))
+            saved = self.path.read_bytes()
+            update_profile(profiles_path, profile["profile_id"], "Renamed", "", "", "", "100")
+            self.assertEqual(self.path.read_bytes(), saved)
+            history.append_inspection(self.path, self.record())
+            self.assertEqual(history.load_history(self.path)["schema_version"], 3)
+        saved = self.path.read_bytes()
+        delete_profile(profiles_path, profile["profile_id"])
+        self.assertEqual(self.path.read_bytes(), saved)
+        profile["make"] = "caller mutation"
+        self.assertEqual(record["profile_snapshot"]["make"], "Ford")
+        record["profile_snapshot"]["model"] = "caller mutation"
+        self.assertEqual(history.load_history(self.path)["inspections"][-2]["profile_snapshot"]["model"], "Transit")
+
+    def test_profile_metadata_rejection_preserves_history(self):
+        from vehicle_profiles import create_profile
+        profile = create_profile(self.directory / "vehicle_profiles.json", "Unit", "", "", "", "0")
+        record = history.create_inspection_record("Unit", "0", "", self.data,
+            findings=history.create_default_findings(), assessment="Ready for service", profile=profile)
+        for version in (1, 2):
+            self.path.write_text(json.dumps({"schema_version": version, "inspections": [record]}))
+            before = self.path.read_bytes()
+            with self.assertRaises(ValueError):
+                history.append_inspection(self.path, record)
+            self.assertEqual(self.path.read_bytes(), before)
+        for mutation in (lambda r: r.pop("profile_id"), lambda r: r.pop("profile_snapshot"),
+                         lambda r: r.pop("assessment"), lambda r: r.update(profile_id="bad"),
+                         lambda r: r.update(profile_snapshot=None),
+                         lambda r: r["profile_snapshot"].update(profile_id=profile["profile_id"]),
+                         lambda r: r["profile_snapshot"].update(year=True),
+                         lambda r: r["profile_snapshot"].pop("make")):
+            malformed = deepcopy(record)
+            mutation(malformed)
+            self.path.write_text(json.dumps({"schema_version": 3, "inspections": [self.record(), malformed]}))
+            before = self.path.read_bytes()
+            with self.assertRaises(ValueError):
+                history.load_history(self.path)
+            with self.assertRaises(ValueError):
+                history.append_inspection(self.path, record)
+            self.assertEqual(self.path.read_bytes(), before)
 
 
 if __name__ == "__main__":

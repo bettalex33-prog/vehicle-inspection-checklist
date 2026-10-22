@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 checklist_data.json
 inspection_history.json
+vehicle_profiles.json

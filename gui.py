@@ -11,6 +11,8 @@ from tkinter import ttk
 from inspection_history import (create_inspection_record, append_inspection, load_history,
                                 create_default_findings, validate_findings, CONDITIONS, ASSESSMENTS)
 
+from vehicle_profiles import load_profiles, create_profile, update_profile, delete_profile
+
 from checklist import (
     create_default_data,
     load_data,
@@ -26,15 +28,35 @@ DATA_PATH = Path(__file__).resolve().parent / "checklist_data.json"
 class ChecklistApp:
     """Display checklist state and delegate changes to the checklist module."""
 
-    def __init__(self, root, data_path=DATA_PATH, history_path=None):
+    def __init__(self, root, data_path=DATA_PATH, history_path=None, profiles_path=None):
         self.root = root
         self.data_path = data_path
         self.history_path = (Path(history_path) if history_path is not None else
                              Path(data_path).with_name("inspection_history.json"))
+        self.profiles_path = (Path(profiles_path) if profiles_path is not None else
+                              Path(data_path).with_name("vehicle_profiles.json"))
+        self.profiles = []
+        self.active_profile = None
+        self.profiles_available = False
         root.title("Vehicle Inspection Checklist")
 
         content = tk.Frame(root, padx=20, pady=20)
         content.pack(fill="both", expand=True)
+        tk.Label(content, text="Vehicle profile (optional)").pack(anchor="w")
+        self.profile_selector = ttk.Combobox(content, state="readonly", width=60)
+        self.profile_selector.pack(fill="x")
+        self.profile_selector.bind("<<ComboboxSelected>>", self.select_profile)
+        profile_buttons = tk.Frame(content)
+        profile_buttons.pack(fill="x")
+        self.profile_buttons = []
+        for label, command in (("New Profile…", self.new_profile),
+                               ("Edit Profile…", self.edit_profile),
+                               ("Delete Profile…", self.delete_profile)):
+            button = tk.Button(profile_buttons, text=label, command=command)
+            button.pack(side="left", padx=3)
+            self.profile_buttons.append(button)
+        tk.Button(profile_buttons, text="Reload Profiles", command=self.reload_profiles).pack(side="left")
+        tk.Label(content, text="Name and mileage below are inspection values; profiles are not updated by saving.").pack(anchor="w")
         self.vehicle_name = tk.StringVar(master=root)
         self.mileage = tk.StringVar(master=root)
         for label, variable in (("Vehicle name / unit number", self.vehicle_name),
@@ -80,6 +102,7 @@ class ChecklistApp:
                 side="left", padx=4
             )
         self.refresh()
+        self.reload_profiles()
 
     def save_inspection(self):
         """Save a snapshot without resetting checklist or form fields."""
@@ -87,12 +110,82 @@ class ChecklistApp:
             record = create_inspection_record(
                 self.vehicle_name.get(), self.mileage.get(),
                 self.notes.get("1.0", "end-1c"), load_data(self.data_path),
-                findings=self.findings, assessment=self.assessment.get())
+                findings=self.findings, assessment=self.assessment.get(),
+                profile=self.active_profile)
             append_inspection(self.history_path, record)
         except (ValueError, OSError) as error:
             messagebox.showerror("Save Inspection", str(error), parent=self.root)
             return
         messagebox.showinfo("Save Inspection", "Inspection saved.", parent=self.root)
+
+    def reload_profiles(self):
+        """Reload choices without replacing the current inspection draft snapshot."""
+        try:
+            profiles = load_profiles(self.profiles_path)["profiles"]
+        except (ValueError, OSError) as error:
+            self.profiles_available = False
+            self.profile_selector.configure(values=["Manual entry"], state="disabled")
+            self.profile_selector.current(0)
+            for button in self.profile_buttons:
+                button.configure(state=tk.DISABLED)
+            # Keep manual entry available even when the store cannot be read.
+            self.active_profile = None
+            messagebox.showerror("Vehicle Profiles", str(error), parent=self.root)
+            return False
+        self.profiles = profiles
+        self.profiles_available = True
+        self.profile_selector.configure(state="readonly", values=["Manual entry"] + [
+            f"{p['vehicle_name']} [{p['profile_id']}]" for p in profiles])
+        for button in self.profile_buttons:
+            button.configure(state=tk.NORMAL)
+        ids = [p["profile_id"] for p in profiles]
+        if self.active_profile is not None and self.active_profile["profile_id"] in ids:
+            self.profile_selector.current(ids.index(self.active_profile["profile_id"]) + 1)
+        else:
+            self.active_profile = None
+            self.profile_selector.current(0)
+        return True
+
+    def select_profile(self, event=None):
+        index = self.profile_selector.current()
+        if index == 0:
+            self.active_profile = None
+        elif self.profiles_available and 0 < index <= len(self.profiles):
+            self._apply_profile(self.profiles[index - 1])
+
+    def _apply_profile(self, profile):
+        self.active_profile = deepcopy(profile)
+        self.vehicle_name.set(profile["vehicle_name"])
+        self.mileage.set(str(profile["mileage"]))
+
+    def _profile_saved(self, profile):
+        self._apply_profile(profile)
+        self.reload_profiles()
+
+    def new_profile(self):
+        if self.profiles_available:
+            ProfileEditor(self.root, self.profiles_path, self._profile_saved)
+
+    def edit_profile(self):
+        if self.profiles_available and self.active_profile is not None:
+            ProfileEditor(self.root, self.profiles_path, self._profile_saved,
+                          profile=self.active_profile)
+
+    def delete_profile(self):
+        if not self.profiles_available or self.active_profile is None:
+            return
+        profile = self.active_profile
+        if not messagebox.askyesno("Delete Vehicle Profile",
+                f"Delete {profile['vehicle_name']}? Saved inspections will remain preserved.",
+                parent=self.root):
+            return
+        try:
+            delete_profile(self.profiles_path, profile["profile_id"])
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Vehicle Profiles", str(error), parent=self.root)
+            return
+        self.active_profile = None
+        self.reload_profiles()
 
     def open_findings(self):
         FindingsWindow(self.root, self.findings, self._apply_findings)
@@ -127,6 +220,44 @@ class ChecklistApp:
         ):
             reset_items(self.data_path)
             self.refresh()
+
+
+class ProfileEditor:
+    """A modal form; persistence and validation remain outside tkinter."""
+
+    def __init__(self, parent, profiles_path, on_saved, profile=None):
+        self.profiles_path = profiles_path
+        self.on_saved = on_saved
+        self.profile = deepcopy(profile)
+        self.root = tk.Toplevel(parent)
+        self.root.title("Edit Vehicle Profile" if profile else "New Vehicle Profile")
+        self.root.transient(parent)
+        self.root.grab_set()
+        self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+        self.fields = {}
+        for key, label in (("vehicle_name", "Vehicle name / unit number (required)"),
+                           ("year", "Year (optional)"), ("make", "Make (optional)"),
+                           ("model", "Model (optional)"), ("mileage", "Current mileage (required)")):
+            value = profile[key] if profile else ""
+            variable = tk.StringVar(master=self.root, value="" if value is None else str(value))
+            self.fields[key] = variable
+            tk.Label(self.root, text=label).pack(anchor="w", padx=12)
+            tk.Entry(self.root, textvariable=variable).pack(fill="x", padx=12)
+        tk.Button(self.root, text="Save Profile", command=self.save).pack(side="left", padx=12, pady=8)
+        tk.Button(self.root, text="Cancel", command=self.root.destroy).pack(side="right", padx=12, pady=8)
+
+    def save(self):
+        values = {key: variable.get() for key, variable in self.fields.items()}
+        try:
+            if self.profile is None:
+                profile = create_profile(self.profiles_path, **values)
+            else:
+                profile = update_profile(self.profiles_path, self.profile["profile_id"], **values)
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Vehicle Profile", str(error), parent=self.root)
+            return
+        self.on_saved(profile)
+        self.root.destroy()
 
 
 class FindingsWindow:
@@ -246,6 +377,14 @@ class HistoryWindow:
         record = self.records[int(selection[0])]
         lines = [f"Vehicle: {record['vehicle_name']}", f"Mileage: {record['mileage']}",
                  f"Timestamp: {record['timestamp']}", f"Notes: {record['notes']}", ""]
+        if "profile_snapshot" in record:
+            lines.append(f"Profile ID: {record['profile_id']}")
+            lines.append("Profile snapshot (at selection or profile edit):")
+            for key, value in record["profile_snapshot"].items():
+                lines.append(f"  {key.replace('_', ' ').title()}: {value if value is not None else 'Not specified'}")
+            lines.append("")
+        else:
+            lines.append("Profile: Manual entry / no profile recorded")
         legacy = "Not recorded (legacy inspection)"
         lines.append(f"Overall assessment (user-selected): {record.get('assessment', legacy)}")
         for item_id, item in record["items"].items():

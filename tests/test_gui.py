@@ -47,7 +47,7 @@ class TestChecklistGUI(unittest.TestCase):
                 complete.assert_called_once_with(item_id)
         buttons = {call.kwargs["text"]: call.kwargs["command"]
                    for call in self.widgets["Button"].call_args_list}
-        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…"})
+        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles"})
         self.assertEqual(buttons["Save Inspection"], self.app.save_inspection)
         self.assertEqual(buttons["History"], self.app.open_history)
         self.assertEqual(buttons["Refresh"], self.app.refresh)
@@ -245,6 +245,165 @@ class TestChecklistGUI(unittest.TestCase):
             self.assertIn(expected, text)
         for item in record["items"].values():
             self.assertIn(item["name"], text)
+
+    def make_profile(self):
+        from vehicle_profiles import create_profile
+        return create_profile(self.app.profiles_path, "Unit", "2020", "Ford", "Transit", "42")
+
+    def test_profile_selection_manual_entry_and_saved_snapshot(self):
+        profile = self.make_profile()
+        self.assertEqual(self.app.profiles_path, self.data_path.with_name("vehicle_profiles.json"))
+        self.assertTrue(self.app.reload_profiles())
+        self.app.profile_selector.current.return_value = 1
+        self.app.select_profile()
+        self.app.vehicle_name.set.assert_called_with("Unit")
+        self.app.mileage.set.assert_called_with("42")
+        self.app.vehicle_name.get.return_value = "Inspection name"
+        self.app.mileage.get.return_value = "99"
+        before = self.app.profiles_path.read_bytes()
+        with patch.object(gui.messagebox, "showinfo"):
+            self.app.save_inspection()
+        record = load_history(self.history_path)["inspections"][0]
+        self.assertEqual(record["profile_id"], profile["profile_id"])
+        self.assertEqual(record["profile_snapshot"]["mileage"], 42)
+        self.assertEqual(record["mileage"], 99)
+        self.assertEqual(self.app.profiles_path.read_bytes(), before)
+        window = gui.HistoryWindow(self.root, self.history_path)
+        window.tree.selection.return_value = ("0",)
+        window.show_selected_inspection()
+        detail = window.details.insert.call_args.args[1]
+        for value in (profile["profile_id"], "Ford", "Transit", "2020", "99", "42"):
+            self.assertIn(value, detail)
+        self.app.vehicle_name.set.reset_mock()
+        self.app.mileage.set.reset_mock()
+        self.app.profile_selector.current.return_value = 0
+        self.app.select_profile()
+        self.assertIsNone(self.app.active_profile)
+        self.app.vehicle_name.set.assert_not_called()
+        self.app.mileage.set.assert_not_called()
+        with patch.object(gui.messagebox, "showinfo"):
+            self.app.save_inspection()
+        self.assertNotIn("profile_id", load_history(self.history_path)["inspections"][-1])
+
+    def test_profile_deletion_confirmation_failure_and_draft_retention(self):
+        from vehicle_profiles import load_profiles
+        profile = self.make_profile()
+        self.app.reload_profiles()
+        self.app._apply_profile(profile)
+        self.app.vehicle_name.set.reset_mock()
+        self.app.mileage.set.reset_mock()
+        before = self.app.profiles_path.read_bytes()
+        with patch.object(gui.messagebox, "askyesno", return_value=False):
+            self.app.delete_profile()
+        self.assertEqual(self.app.profiles_path.read_bytes(), before)
+        self.assertEqual(self.app.active_profile, profile)
+        with patch.object(gui.messagebox, "askyesno", return_value=True):
+            with patch.object(gui, "delete_profile", side_effect=OSError("failure")):
+                with patch.object(gui.messagebox, "showerror") as error:
+                    self.app.delete_profile()
+                    error.assert_called_once()
+            self.assertEqual(self.app.active_profile, profile)
+            self.app.delete_profile()
+        self.assertIsNone(self.app.active_profile)
+        self.assertEqual(load_profiles(self.app.profiles_path)["profiles"], [])
+        self.app.vehicle_name.set.assert_not_called()
+        self.app.mileage.set.assert_not_called()
+        self.app.notes.delete.assert_not_called()
+
+    def test_profile_editor_create_edit_cancel_errors_and_connections(self):
+        from vehicle_profiles import load_profiles
+        with patch.object(gui, "ProfileEditor") as editor:
+            self.app.new_profile()
+            editor.assert_called_once_with(self.root, self.app.profiles_path, self.app._profile_saved)
+        window = gui.ProfileEditor(self.root, self.app.profiles_path, self.app._profile_saved)
+        values = dict(vehicle_name="Unit", year="", make="", model="", mileage="0")
+        for key, value in values.items():
+            window.fields[key].get.return_value = value
+        window.fields["mileage"].get.return_value = "-1"
+        with patch.object(gui.messagebox, "showerror"):
+            window.save()
+        self.assertFalse(self.app.profiles_path.exists())
+        window.root.destroy.assert_not_called()
+        window.fields["mileage"].get.return_value = "0"
+        window.save()
+        profile = self.app.active_profile.copy()
+        window.root.destroy.assert_called_once()
+        with patch.object(gui, "ProfileEditor") as editor:
+            self.app.edit_profile()
+            editor.assert_called_once_with(self.root, self.app.profiles_path,
+                                          self.app._profile_saved, profile=profile)
+        edited = gui.ProfileEditor(self.root, self.app.profiles_path, self.app._profile_saved, profile)
+        for key, value in values.items():
+            edited.fields[key].get.return_value = value
+        edited.fields["vehicle_name"].get.return_value = "Renamed"
+        edited.save()
+        self.assertEqual(self.app.active_profile["profile_id"], profile["profile_id"])
+        self.assertEqual(self.app.active_profile["vehicle_name"], "Renamed")
+        before = self.app.profiles_path.read_bytes()
+        cancelled = gui.ProfileEditor(self.root, self.app.profiles_path, self.app._profile_saved, profile)
+        buttons = {c.kwargs["text"]: c.kwargs["command"] for c in self.widgets["Button"].call_args_list}
+        buttons["Cancel"]()
+        self.assertEqual(self.app.profiles_path.read_bytes(), before)
+        cancelled.root.protocol.assert_called_once_with("WM_DELETE_WINDOW", cancelled.root.destroy)
+        self.assertEqual(len(load_profiles(self.app.profiles_path)["profiles"]), 1)
+
+    def test_corrupt_profiles_report_allow_manual_inspection_and_recover(self):
+        self.app.profiles_path.write_text("broken")
+        with patch.object(gui.messagebox, "showerror") as error:
+            self.assertFalse(self.app.reload_profiles())
+            error.assert_called_once()
+        self.assertFalse(self.app.profiles_available)
+        with patch.object(gui, "ProfileEditor") as editor:
+            self.app.new_profile()
+            self.app.edit_profile()
+            editor.assert_not_called()
+        with patch.object(gui.messagebox, "showinfo"):
+            self.app.save_inspection()
+        self.assertNotIn("profile_id", load_history(self.history_path)["inspections"][0])
+        self.assertEqual(self.app.profiles_path.read_text(), "broken")
+        self.app.profiles_path.write_text('{"schema_version":1,"profiles":[]}')
+        self.assertTrue(self.app.reload_profiles())
+        self.app.profile_selector.configure.assert_called_with(state="readonly", values=["Manual entry"])
+
+    def test_profile_reload_retains_snapshot_until_reselection_and_clears_removed(self):
+        from vehicle_profiles import update_profile, delete_profile
+        profile = self.make_profile()
+        self.app.reload_profiles()
+        self.app._apply_profile(profile)
+        self.app.vehicle_name.set.reset_mock()
+        self.app.mileage.set.reset_mock()
+        update_profile(self.app.profiles_path, profile["profile_id"], "Changed", "", "", "", "100")
+        self.app.refresh()
+        self.app.reload_profiles()
+        self.assertEqual(self.app.active_profile, profile)
+        self.app.vehicle_name.set.assert_not_called()
+        self.app.mileage.set.assert_not_called()
+        self.app.profile_selector.current.return_value = 1
+        self.app.select_profile()
+        self.assertEqual(self.app.active_profile["mileage"], 100)
+        delete_profile(self.app.profiles_path, profile["profile_id"])
+        self.app.vehicle_name.set.reset_mock()
+        self.app.mileage.set.reset_mock()
+        self.app.reload_profiles()
+        self.assertIsNone(self.app.active_profile)
+        self.app.vehicle_name.set.assert_not_called()
+        self.app.mileage.set.assert_not_called()
+
+    def test_explicit_profiles_path_and_editor_io_failure(self):
+        path = self.data_path.with_name("injected_profiles.json")
+        app = gui.ChecklistApp(self.root, self.data_path, self.history_path, path)
+        self.assertEqual(app.profiles_path, path)
+        callback = MagicMock()
+        window = gui.ProfileEditor(self.root, path, callback)
+        for key, value in dict(vehicle_name="Unit", year="", make="", model="", mileage="0").items():
+            window.fields[key].get.return_value = value
+        with patch.object(gui, "create_profile", side_effect=OSError("disk full")):
+            with patch.object(gui.messagebox, "showerror") as error:
+                window.save()
+                error.assert_called_once()
+        callback.assert_not_called()
+        window.root.destroy.assert_not_called()
+        self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":
