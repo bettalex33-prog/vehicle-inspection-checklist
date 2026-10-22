@@ -14,6 +14,12 @@ No installation needed. Simply place this project in your Python environment and
 
 ### Open the graphical checklist on macOS
 
+Double-click `launch_checklist.command` in Finder to open the GUI. If macOS blocks
+the first launch, use **Control-click > Open** on the launcher. A Terminal window
+may remain visible while the GUI runs.
+
+You can also launch it from Terminal:
+
 ```bash
 python3 gui.py
 ```
