@@ -60,6 +60,45 @@ time: simultaneous saves from multiple instances can overwrite each other's
 updates. A save snapshots the persisted checklist, including prior CLI changes;
 avoid changing it through the CLI during a save.
 
+### Inspection findings (v1.2.0)
+
+Click **Edit Findings…** to open a compact editor. Select any inspection item,
+including a completed item, and choose **OK**, **Needs attention**, or
+**Not inspected**. Each item also accepts an optional multiline comment.
+Switching items retains edits within the editor. **Apply** updates the current
+form draft; **Cancel** or closing the editor discards that editor session.
+New drafts start with Not inspected and empty comments for all seven items.
+
+Before saving, explicitly choose an **Overall assessment**: **Ready for service**,
+**Service recommended**, or **Do not operate**. This is a user-selected record,
+not an automated mechanical or safety diagnosis. The application never infers
+conditions or assessment from completion and does not enforce relationships
+between those values. Completion and progress continue to work exactly as before.
+
+Vehicle details, findings, and assessment are the **current draft**. Saving retains
+all draft values and checklist completion. Refresh reloads completion only;
+Reset All clears completion only. Review retained values before saving another
+inspection. Draft form values are not restored after closing the application;
+they persist only inside successfully saved inspection records.
+
+History details show every item's completion status, condition, and comment,
+plus the user-selected assessment. The details area scrolls for long comments.
+Legacy records display **Not recorded (legacy inspection)** for absent findings
+and assessment; no historical values are inferred.
+
+Version-1 history remains readable without changing its file. Only a successful
+new inspection append upgrades the history envelope to **schema_version 2**.
+Existing records retain their exact JSON content (file whitespace may change).
+Version 2 supports both legacy records and complete new records containing all
+seven findings plus assessment. Partial, corrupt, malformed, duplicate-key, and
+unsupported history is rejected without overwriting the original file. Failed
+saves leave the previous file intact. Checklist data retains its original format;
+findings and assessment are stored exclusively in inspection history.
+
+Back up history before the first v1.2.0 save: v1.1.1 and earlier cannot read
+schema-version-2 history and will reject it. There is no automatic downgrade.
+The existing single-instance recommendation still applies.
+
 Progress appears in this format:
 
 ```text

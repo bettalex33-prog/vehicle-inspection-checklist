@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import gui
 from checklist import create_default_data, load_data, set_complete
-from inspection_history import load_history, create_inspection_record, append_inspection
+from inspection_history import load_history, create_inspection_record, append_inspection, create_default_findings
 from datetime import datetime, timezone
 
 
@@ -27,7 +27,12 @@ class TestChecklistGUI(unittest.TestCase):
         tree_patcher = patch.object(gui.ttk, "Treeview", side_effect=lambda *a, **k: MagicMock())
         self.tree_widget = tree_patcher.start()
         self.addCleanup(tree_patcher.stop)
+        for name in ("Combobox", "Scrollbar"):
+            patcher = patch.object(gui.ttk, name, side_effect=lambda *a, **k: MagicMock())
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.app = gui.ChecklistApp(self.root, self.data_path, self.history_path)
+        self.app.assessment.get.return_value = "Ready for service"
         self.app.vehicle_name.get.return_value = " Unit 12 "
         self.app.mileage.get.return_value = "42"
         self.app.notes.get.return_value = "Notes\nsecond line"
@@ -42,7 +47,7 @@ class TestChecklistGUI(unittest.TestCase):
                 complete.assert_called_once_with(item_id)
         buttons = {call.kwargs["text"]: call.kwargs["command"]
                    for call in self.widgets["Button"].call_args_list}
-        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History"})
+        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…"})
         self.assertEqual(buttons["Save Inspection"], self.app.save_inspection)
         self.assertEqual(buttons["History"], self.app.open_history)
         self.assertEqual(buttons["Refresh"], self.app.refresh)
@@ -140,7 +145,7 @@ class TestChecklistGUI(unittest.TestCase):
         window.details.insert.assert_called_with("1.0", "No saved inspections.")
         for year in (2025, 2026):
             record = create_inspection_record("Unit", "0", "Multiline\nnotes",
-                create_default_data(), timestamp=datetime(year, 1, 1, tzinfo=timezone.utc))
+                create_default_data(), findings=create_default_findings(), assessment="Ready for service", timestamp=datetime(year, 1, 1, tzinfo=timezone.utc))
             append_inspection(self.history_path, record)
         window.refresh()
         self.assertTrue(window.records[0]["timestamp"].startswith("2026"))
@@ -157,6 +162,89 @@ class TestChecklistGUI(unittest.TestCase):
             window.refresh()
             error.assert_called_once()
         self.assertEqual(len(window.records), 2)
+
+    def test_required_assessment_and_retained_draft(self):
+        self.app.assessment.get.return_value = ""
+        before = self.data_path.read_bytes()
+        with patch.object(gui.messagebox, "showerror") as error:
+            self.app.save_inspection()
+            error.assert_called_once()
+        self.assertFalse(self.history_path.exists())
+        self.app.findings["oil"] = {"condition": "Needs attention", "comment": "Review ✓\nsoon"}
+        draft = create_default_findings()
+        draft["oil"] = self.app.findings["oil"].copy()
+        self.app.assessment.get.return_value = "Do not operate"
+        self.app.refresh()
+        with patch.object(gui.messagebox, "askyesno", return_value=True):
+            self.app.reset_all()
+        before = self.data_path.read_bytes()
+        with patch.object(gui.messagebox, "showinfo"):
+            self.app.save_inspection()
+        record = load_history(self.history_path)["inspections"][0]
+        self.assertEqual(record["findings"], draft)
+        self.assertEqual(record["assessment"], "Do not operate")
+        self.assertEqual(self.app.findings, draft)
+        self.app.assessment.set.assert_not_called()
+        self.assertEqual(self.data_path.read_bytes(), before)
+
+    def test_findings_editor_switch_apply_cancel_and_completed_item(self):
+        self.app.complete_item("oil")
+        before = self.data_path.read_bytes()
+        with patch.object(gui, "FindingsWindow") as editor:
+            self.app.open_findings()
+            editor.assert_called_once_with(self.root, self.app.findings, self.app._apply_findings)
+        window = gui.FindingsWindow(self.root, self.app.findings, self.app._apply_findings)
+        window.condition.get.return_value = "Needs attention"
+        window.comment.get.return_value = "Oil comment\nsecond line"
+        window.items.selection.return_value = ("tires",)
+        window.select_item()
+        self.assertEqual(window.findings["oil"]["condition"], "Needs attention")
+        self.assertEqual(self.app.findings["oil"]["condition"], "Not inspected")
+        window.condition.get.return_value = "OK"
+        window.comment.get.return_value = "Tires comment"
+        window.apply()
+        self.assertEqual(self.app.findings["oil"]["comment"], "Oil comment\nsecond line")
+        self.assertEqual(self.app.findings["tires"]["condition"], "OK")
+        window.root.destroy.assert_called_once()
+        self.assertEqual(self.data_path.read_bytes(), before)
+        cancelled = gui.FindingsWindow(self.root, self.app.findings, self.app._apply_findings)
+        cancelled.findings["oil"]["comment"] = "discarded"
+        buttons = {call.kwargs["text"]: call.kwargs["command"]
+                   for call in self.widgets["Button"].call_args_list}
+        buttons["Cancel"]()
+        self.assertEqual(self.app.findings["oil"]["comment"], "Oil comment\nsecond line")
+        cancelled.root.protocol.assert_called_once_with("WM_DELETE_WINDOW", cancelled.root.destroy)
+        cancelled.condition.get.return_value = "invalid"
+        cancelled.comment.get.return_value = ""
+        with patch.object(gui.messagebox, "showerror") as error:
+            cancelled.apply()
+            error.assert_called_once()
+
+    def test_history_legacy_and_findings_details(self):
+        record = create_inspection_record("Unit", "0", "", create_default_data(),
+            findings=create_default_findings(), assessment="Service recommended")
+        record["items"]["oil"]["complete"] = True
+        record["progress"] = {"completed": 1, "total": 7, "percentage": 1 / 7 * 100}
+        record["findings"]["oil"] = {"condition": "Needs attention", "comment": "Check ✓\nagain"}
+        import json
+        legacy = {key: value for key, value in record.items() if key not in ("findings", "assessment")}
+        self.history_path.write_text(json.dumps({"schema_version": 1, "inspections": [legacy]}))
+        before = self.history_path.read_bytes()
+        window = gui.HistoryWindow(self.root, self.history_path)
+        window.tree.selection.return_value = ("0",)
+        window.show_selected_inspection()
+        self.assertIn("Not recorded (legacy inspection)", window.details.insert.call_args.args[1])
+        self.assertEqual(self.history_path.read_bytes(), before)
+        append_inspection(self.history_path, record)
+        window.refresh()
+        window.records = [record]
+        window.show_selected_inspection()
+        text = window.details.insert.call_args.args[1]
+        for expected in ("Service recommended", "Needs attention", "Check ✓\nagain",
+                         "Completion: Complete", "Completion: Incomplete", "Not inspected"):
+            self.assertIn(expected, text)
+        for item in record["items"].values():
+            self.assertIn(item["name"], text)
 
 
 if __name__ == "__main__":

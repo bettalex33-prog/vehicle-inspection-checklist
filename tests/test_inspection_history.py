@@ -24,7 +24,8 @@ class TestInspectionHistory(unittest.TestCase):
 
     def record(self, **kwargs):
         return history.create_inspection_record(" Unit 12 ", "0042", "Notes\nline 2",
-                                                 self.data, timestamp=kwargs.get("timestamp", self.stamp))
+                                                 self.data, findings=history.create_default_findings(), assessment="Ready for service",
+                                                 timestamp=kwargs.get("timestamp", self.stamp))
 
     def test_vehicle_validation(self):
         self.assertEqual(history.validate_vehicle_details(" Unit ", " 000 "), ("Unit", 0, ""))
@@ -41,7 +42,7 @@ class TestInspectionHistory(unittest.TestCase):
     def test_timestamp_utc_and_injection(self):
         record = self.record(timestamp=self.stamp.astimezone(timezone(timedelta(hours=3))))
         self.assertEqual(record["timestamp"], self.stamp.isoformat())
-        generated = history.create_inspection_record("Unit", "0", "", self.data)
+        generated = history.create_inspection_record("Unit", "0", "", self.data, findings=history.create_default_findings(), assessment="Ready for service")
         stamp = datetime.fromisoformat(generated["timestamp"])
         self.assertEqual(stamp.utcoffset(), timedelta(0))
         self.assertLess(abs((datetime.now(timezone.utc) - stamp).total_seconds()), 5)
@@ -53,7 +54,7 @@ class TestInspectionHistory(unittest.TestCase):
             data = create_default_data()
             for item_id in list(data)[:count]:
                 data[item_id]["complete"] = True
-            record = history.create_inspection_record("Unit", "0", "", data)
+            record = history.create_inspection_record("Unit", "0", "", data, findings=history.create_default_findings(), assessment="Ready for service")
             self.assertEqual(record["items"], data)
             self.assertEqual(record["progress"], {
                 "completed": count, "total": 7, "percentage": count / 7 * 100})
@@ -67,7 +68,7 @@ class TestInspectionHistory(unittest.TestCase):
     def test_append_reload_duplicate_and_reset_independence(self):
         set_complete(self.checklist_path, "oil")
         data = load_data(self.checklist_path)
-        record = history.create_inspection_record("Unit", "42", "", data)
+        record = history.create_inspection_record("Unit", "42", "", data, findings=history.create_default_findings(), assessment="Ready for service")
         before = self.checklist_path.read_bytes()
         history.append_inspection(self.path, record)
         history.append_inspection(self.path, record)
@@ -84,11 +85,11 @@ class TestInspectionHistory(unittest.TestCase):
             data = deepcopy(self.data)
             change(data)
             with self.assertRaises(ValueError):
-                history.create_inspection_record("Unit", "0", "", data)
+                history.create_inspection_record("Unit", "0", "", data, findings=history.create_default_findings(), assessment="Ready for service")
 
     def test_corrupt_malformed_unsupported_history_never_overwritten(self):
-        valid = {"schema_version": 1, "inspections": [self.record()]}
-        invalid = ["broken", "", "[]", '{"schema_version":2,"inspections":[]}',
+        valid = {"schema_version": 2, "inspections": [self.record()]}
+        invalid = ["broken", "", "[]", '{"schema_version":3,"inspections":[]}',
                    '{"schema_version":2,"schema_version":1,"inspections":[]}',
                    '{"schema_version":true,"inspections":[]}',
                    '{"schema_version":1,"inspections":{}}']
@@ -151,6 +152,89 @@ class TestInspectionHistory(unittest.TestCase):
             with self.assertRaises(OSError):
                 history.append_inspection(self.path, self.record())
         self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_findings_validation_and_independence(self):
+        defaults = history.create_default_findings()
+        for condition in history.CONDITIONS:
+            for assessment in history.ASSESSMENTS:
+                defaults["oil"] = {"condition": condition, "comment": "Unicode ✓\nsecond line"}
+                record = history.create_inspection_record(
+                    "Unit", "0", "", self.data, findings=defaults, assessment=assessment)
+                self.assertEqual(record["findings"], defaults)
+                self.assertEqual(record["assessment"], assessment)
+                self.assertEqual(record["progress"]["completed"], 0)
+                record["findings"]["oil"]["comment"] = "changed"
+                self.assertNotEqual(record["findings"], defaults)
+        fresh = history.create_default_findings()
+        self.assertEqual(fresh["oil"], {"condition": "Not inspected", "comment": ""})
+        copied = history.validate_findings(fresh)
+        copied["oil"]["comment"] = "independent"
+        self.assertEqual(fresh["oil"]["comment"], "")
+        for assessment in ("", None, True, "unknown", " Ready for service "):
+            with self.subTest(assessment=assessment), self.assertRaises(ValueError):
+                history.validate_assessment(assessment)
+        for mutation in (
+            lambda f: f.pop("oil"), lambda f: f.update(extra={}),
+            lambda f: f["oil"].update(condition="unknown"),
+            lambda f: f["oil"].update(condition=None),
+            lambda f: f["oil"].update(comment=None),
+            lambda f: f["oil"].pop("comment"),
+            lambda f: f["oil"].update(extra="unexpected"),
+        ):
+            findings = history.create_default_findings()
+            mutation(findings)
+            with self.assertRaises(ValueError):
+                history.validate_findings(findings)
+        with self.assertRaises(TypeError):
+            history.create_inspection_record("Unit", "0", "", self.data)
+
+    def test_legacy_read_upgrade_and_failed_upgrade(self):
+        legacy = self.record()
+        legacy.pop("findings")
+        legacy.pop("assessment")
+        original = {"schema_version": 1, "inspections": [legacy, deepcopy(legacy)]}
+        self.path.write_text(json.dumps(original, indent=4))
+        before = self.path.read_bytes()
+        self.assertEqual(history.load_history(self.path), original)
+        self.assertEqual(self.path.read_bytes(), before)
+        for target in ("json.dump", "os.fsync", "os.replace"):
+            with patch("inspection_history." + target, side_effect=OSError("failure")):
+                with self.assertRaises(OSError):
+                    history.append_inspection(self.path, self.record())
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(list(self.directory.iterdir()), [self.path])
+        with self.assertRaises(ValueError):
+            history.append_inspection(self.path, legacy)
+        self.assertEqual(self.path.read_bytes(), before)
+        new = self.record()
+        history.append_inspection(self.path, new)
+        history.append_inspection(self.path, new)
+        new["findings"]["oil"]["comment"] = "changed after save"
+        loaded = history.load_history(self.path)
+        self.assertEqual(loaded["schema_version"], 2)
+        self.assertEqual(loaded["inspections"][:2], original["inspections"])
+        self.assertEqual(loaded["inspections"][2:], [self.record(), self.record()])
+
+    def test_partial_findings_and_schema_mismatch_never_overwritten(self):
+        for version in (1, 2):
+            for mutation in (
+                lambda r: r.pop("assessment"), lambda r: r.pop("findings"),
+                lambda r: r["findings"].pop("oil"),
+                lambda r: r.update(assessment=""),
+                lambda r: r["findings"]["oil"].update(comment=1),
+            ):
+                record = self.record()
+                mutation(record)
+                self.path.write_text(json.dumps({"schema_version": version, "inspections": [record]}))
+                before = self.path.read_bytes()
+                with self.assertRaises(ValueError):
+                    history.append_inspection(self.path, self.record())
+                self.assertEqual(self.path.read_bytes(), before)
+        self.path.write_text(json.dumps({"schema_version": 1, "inspections": [self.record()]}))
+        before = self.path.read_bytes()
+        with self.assertRaises(ValueError):
+            history.append_inspection(self.path, self.record())
+        self.assertEqual(self.path.read_bytes(), before)
 
 
 if __name__ == "__main__":
