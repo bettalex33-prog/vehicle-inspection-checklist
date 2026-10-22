@@ -30,6 +30,36 @@ remain checked and disabled until you use **Reset All** and confirm the dialog.
 **Refresh** reloads changes made through the CLI, and **Close** exits the window.
 Both interfaces share the same `checklist_data.json` beside the scripts.
 
+### Save and review inspections (v1.1.0)
+
+Enter a **Vehicle name / unit number**, **Mileage**, and optional multiline
+**Notes**, then click **Save Inspection**. The vehicle name must not be blank.
+Mileage must contain only digits for a nonnegative whole number; surrounding
+whitespace and leading zeros are accepted. Signs, decimals, and separators are
+rejected.
+
+You can save at any progress level, including 0/7. Each save creates a separate
+snapshot containing a timezone-aware UTC ISO 8601 timestamp, vehicle details,
+all seven item names and completion statuses, and overall progress. Saving
+retains your checklist and form entries; it never resets the checklist.
+Form entries persist across restarts only within saved inspection records.
+
+Click **History** to view saved inspections, newest first. Select a row to see
+notes and individual item statuses. **Refresh** reloads history from disk.
+History is read-only; **Reset All** affects only the current checklist.
+
+History is stored separately in `inspection_history.json` beside the scripts,
+using a versioned JSON format. Existing CLI commands and `checklist_data.json`
+remain unchanged. The history file is created on the first successful save and
+is ignored by Git; back it up separately along with your checklist data.
+
+History writes use an atomic temporary-file replacement. Invalid, corrupt, or
+unsupported history produces an error and is never replaced with empty history.
+Keep the original file when investigating an error. Use one app instance at a
+time: simultaneous saves from multiple instances can overwrite each other's
+updates. A save snapshots the persisted checklist, including prior CLI changes;
+avoid changing it through the CLI during a save.
+
 Progress appears in this format:
 
 ```text
@@ -110,6 +140,10 @@ Total: 7/7
 ## Running Tests
 
 Run the built-in unit tests using Python's unittest module:
+
+Tests use temporary directories for checklist and history data. GUI tests mock
+widgets and dialogs without opening windows; history persistence has no tkinter
+dependency and is tested separately.
 
 ```bash
 python3 -m unittest discover -s tests -v
