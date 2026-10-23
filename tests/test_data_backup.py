@@ -41,7 +41,7 @@ class TestBackup(unittest.TestCase):
             self.mapping[name].write_bytes(self.samples[name])
 
     def manifest(self, payloads):
-        return dict(manifest_version=1, application='vehicle-maintenance-checklist', release='1.5.0',
+        return dict(manifest_version=1, application='vehicle-maintenance-checklist', release='1.6.0',
                     created_at=self.stamp.isoformat(), files=[dict(filename=n, size=len(p), sha256=hashlib.sha256(p).hexdigest()) for n, p in sorted(payloads.items())])
 
     def archive(self, payloads=None, manifest=None, extras=(), compression=zipfile.ZIP_DEFLATED):
@@ -344,3 +344,41 @@ class TestBackup(unittest.TestCase):
         db.restore_backup(db.validate_backup(archive), self.paths, confirmed=True)
         self.assertEqual(self.mapping[db.NAMES[3]].read_bytes(), original)
         self.assertFalse(self.paths.profiles.exists())
+
+    def test_work_order_exact_roundtrip_and_legacy_backups_without_fabrication(self):
+        import maintenance_schedule as ms
+        from vehicle_profiles import create_profile
+        from test_maintenance_schedule import details, TODAY
+        profile = create_profile(self.paths.profiles, 'Unit', '', '', '', '43000')
+        schedule_path = self.mapping[db.NAMES[3]]
+        task = ms.create_task(schedule_path, profile['profile_id'], details(), profiles_path=self.paths.profiles, today=TODAY)
+        legacy = dict(service_id='00000000-0000-4000-8000-000000000099', completed_date='2026-10-21', mileage=46000, notes='Legacy')
+        task['services'] = [legacy]
+        legacy_bytes = json.dumps({'schema_version': 1, 'tasks': [task]}, indent=4).encode()
+        for release in ('1.5.0', '1.6.0'):
+            payloads = {db.NAMES[3]: legacy_bytes}
+            manifest = self.manifest(payloads); manifest['release'] = release
+            backup = db.validate_backup(self.archive(payloads, manifest))
+            db.restore_backup(backup, self.paths, confirmed=True)
+            self.assertEqual(schedule_path.read_bytes(), legacy_bytes)
+            self.assertEqual(ms.load_schedule(schedule_path)['tasks'][0]['services'], [legacy])
+        values = ms.validate_service_details('2026-10-22', '48001', 'é work', today=TODAY,
+                            provider='Shop', invoice_reference='INV-1', labor_cost='10.01', parts_cost='0.00')
+        updated = ms.record_service(schedule_path, task['task_id'], values, profiles_path=self.paths.profiles,
+                                    expected_task=task, today=TODAY)
+        ms.archive_task(schedule_path, task['task_id'], expected_task=updated)
+        original = schedule_path.read_bytes()
+        archive = db.create_backup(self.paths, self.root, timestamp=self.stamp)
+        backup = db.validate_backup(archive)
+        schedule_path.unlink()
+        db.restore_backup(backup, self.paths, confirmed=True)
+        self.assertEqual(schedule_path.read_bytes(), original)
+        services = ms.load_schedule(schedule_path)['tasks'][0]['services']
+        self.assertEqual(services[0], legacy)
+        self.assertEqual(services[1]['total_cost_cents'], 1001)
+        self.assertIsNone(services[1]['tax_cents'])
+        self.assertEqual(services[1]['parts_cost_cents'], 0)
+        payloads = {db.NAMES[3]: original}
+        manifest = self.manifest(payloads); manifest['release'] = '1.5.0'
+        with self.assertRaises(ValueError):
+            db.validate_backup(self.archive(payloads, manifest))

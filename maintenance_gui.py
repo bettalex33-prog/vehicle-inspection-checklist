@@ -3,11 +3,12 @@ from copy import deepcopy
 from datetime import date
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from vehicle_profiles import load_profiles
 from maintenance_schedule import (load_schedule, validate_task_details, validate_service_details,
-    create_task, update_task, delete_task, archive_task, record_service, calculate_due)
+    create_task, update_task, delete_task, archive_task, record_service, calculate_due, format_money, COST_KEYS, NOT_RECORDED, task_cost_summary)
+from maintenance_exports import export_maintenance_csv, export_maintenance_html
 
 
 class MaintenanceWindow:
@@ -53,6 +54,8 @@ class MaintenanceWindow:
             button = tk.Button(actions, text=label, command=callback)
             button.pack(side='left', padx=3)
             self.buttons[label] = button
+        tk.Button(self.root, text='Export All History CSV', command=self.export_csv).pack()
+        tk.Button(self.root, text='Export All History HTML', command=self.export_html).pack()
         tk.Button(actions, text='Close', command=self.root.destroy).pack(side='right')
         self.refresh(initial=True)
 
@@ -171,10 +174,51 @@ class MaintenanceWindow:
         lines.extend(f'  {key}: {value}' for key, value in task['profile_snapshot'].items())
         lines.extend(f'{key}: {task[key]}' for key in ('interval_days', 'interval_miles', 'warning_days',
                      'warning_miles', 'baseline_date', 'baseline_mileage', 'scheduled_date', 'notes'))
-        lines += [evaluation, 'Service history:']
+        summary = task_cost_summary(task)
+        lines += [evaluation, f"Recorded task cost: {format_money(summary['total_cost_cents'])}",
+                  f"Services: {summary['service_count']} | Unpriced: {summary['unpriced_service_count']}", 'Service history:']
         for service in task['services']:
             lines.append(f"{service['completed_date']} | {service['mileage']} miles | {service['notes']} [{service['service_id']}]")
+            lines.extend(f"  {key.replace('_', ' ').title()}: {service.get(key) or NOT_RECORDED}"
+                         for key in ('provider', 'invoice_reference'))
+            lines.extend(f"  {key.replace('_cents', '').replace('_', ' ').title()}: {format_money(service.get(key))}"
+                         for key in (*COST_KEYS, 'total_cost_cents'))
         self._details('\n'.join(lines))
+
+    def export_csv(self):
+        self._export('.csv', export_maintenance_csv)
+
+    def export_html(self):
+        self._export('.html', export_maintenance_html)
+
+    def _export(self, extension, exporter):
+        selected = filedialog.asksaveasfilename(parent=self.root, title='Export all maintenance history',
+                    initialdir=str(self.schedule_path.parent / 'exports'),
+                    initialfile='maintenance-history' + extension, defaultextension=extension,
+                    confirmoverwrite=False, filetypes=[('Maintenance report', '*' + extension)])
+        if not selected:
+            return
+        try:
+            from data_backup import reject_output_alias, NAMES
+            protected = [self.schedule_path, self.profiles_path,
+                         *(self.schedule_path.parent / name for name in NAMES)]
+            reject_output_alias(selected, protected)
+            overwrite = Path(selected).exists()
+            if overwrite and not messagebox.askyesno('Overwrite maintenance export', f'Replace {selected}?', parent=self.root):
+                return
+            mileages = {}
+            profile = self.selected_profile()
+            text = self.mileage.get().strip()
+            if profile and text:
+                if any(c not in '0123456789' for c in text):
+                    raise ValueError('Current mileage must contain digits only.')
+                mileages[profile['profile_id']] = int(text)
+            exporter(self.schedule_path, Path(selected), today=date.today(), current_mileages=mileages,
+                     overwrite=overwrite, runtime_paths=protected)
+        except (ValueError, OSError) as error:
+            messagebox.showerror('Maintenance export', str(error), parent=self.root)
+            return
+        messagebox.showinfo('Maintenance export', f'Report saved: {selected}', parent=self.root)
 
     def new_task(self):
         profile = self.selected_profile()
@@ -259,7 +303,9 @@ class RecordServiceDialog:
         self.root.title('Record Service')
         self.root.transient(parent); self.root.grab_set()
         self.fields = {}
-        for key, default in (('completed_date', date.today().isoformat()), ('mileage', ''), ('notes', '')):
+        for key, default in (('completed_date', date.today().isoformat()), ('mileage', ''), ('notes', ''),
+                             ('provider', ''), ('invoice_reference', ''), ('labor_cost', ''),
+                             ('parts_cost', ''), ('tax', '')):
             tk.Label(self.root, text=key.replace('_', ' ').title()).pack(anchor='w', padx=12)
             self.fields[key] = tk.StringVar(master=self.root, value=default)
             tk.Entry(self.root, textvariable=self.fields[key], width=65).pack(fill='x', padx=12)
@@ -270,7 +316,8 @@ class RecordServiceDialog:
         try:
             details = validate_service_details(**{key: var.get() for key, var in self.fields.items()}, today=date.today())
             if not messagebox.askyesno('Record Service',
-                    'Record completed service? Both applicable due thresholds will advance and the appointment will be cleared.', parent=self.root):
+                    f"Record completed service? Total: {format_money(details['total_cost_cents'])}.\n"
+                    'Unrecorded cost components remain Not recorded. Both applicable due thresholds will advance and the appointment will be cleared.', parent=self.root):
                 return
             record_service(self.schedule_path, self.task['task_id'], details, profiles_path=self.profiles_path,
                            expected_task=self.task, today=date.today())

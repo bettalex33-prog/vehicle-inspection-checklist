@@ -23,7 +23,7 @@ class TestCLIRegression(unittest.TestCase):
             self.assertEqual(run('complete', 'oil').stdout, 'oil marked complete. Progress: [█░░░░░░]\n')
             self.assertEqual(run('progress').stdout, 'Progress: [█░░░░░░] 1/7 (14%)\n')
             before = (root / 'checklist_data.json').read_bytes()
-            self.assertEqual(run('complete', 'oil').returncode, 0)
+            self.assertEqual(run('complete', 'oil').stdout, 'oil marked complete. Progress: [█░░░░░░]\n')
             error = run('complete', 'unknown')
             self.assertEqual(error.returncode, 2)
             self.assertIn("Unknown item 'unknown'", error.stderr)

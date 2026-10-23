@@ -148,14 +148,14 @@ class TestMaintenance(unittest.TestCase):
         for key, value in invalid:
             with self.subTest(key=key, value=str(value)[:30]), self.assertRaises(ValueError):
                 ms.validate_task({**task, key: value})
-        for data in ({'schema_version': True, 'tasks': []}, {'schema_version': 2, 'tasks': []},
+        for data in ({'schema_version': True, 'tasks': []}, {'schema_version': 3, 'tasks': []},
                      {'schema_version': 1, 'tasks': [task, task]}, {'schema_version': 1, 'tasks': [], 'extra': 1}):
             with self.assertRaises(ValueError):
                 ms.validate_schedule(data)
         task = self.service(task)
         duplicate = deepcopy(task); duplicate['task_id'] = '00000000-0000-4000-8000-000000000001'
         with self.assertRaises(ValueError):
-            ms.validate_schedule({'schema_version': 1, 'tasks': [task, duplicate]})
+            ms.validate_schedule({'schema_version': 2, 'tasks': [task, duplicate]})
 
     def test_corruption_never_overwritten(self):
         for raw in (b'broken', b'\xff', b'{"schema_version":1,"schema_version":1,"tasks":[]}',
@@ -231,3 +231,144 @@ class TestMaintenance(unittest.TestCase):
         self.path.unlink()
         with self.assertRaises(ValueError):
             ms._write_schedule_atomic(self.profiles, {'schema_version': 1, 'tasks': []}, expected_bytes=self.profiles.read_bytes())
+
+
+class TestWorkOrders(unittest.TestCase):
+    setUp = TestMaintenance.setUp
+    create = TestMaintenance.create
+    service = TestMaintenance.service
+    def work_order(self, **values):
+        return ms.validate_service_details('2026-10-22', '48001', 'Service notes', today=TODAY,
+                                           provider=' Shop é ', invoice_reference=' INV-1 ', **values)
+
+    def test_money_exact_parsing_formatting_and_invalid_inputs(self):
+        for text, expected in (('', None), ('  ', None), ('0', 0), ('0.00', 0), ('1', 100),
+                               ('1.2', 120), (' 123.45 ', 12345), ('99999999999.99', 9999999999999)):
+            self.assertEqual(ms.parse_money(text), expected)
+            if expected is not None:
+                self.assertEqual(ms.parse_money(ms.format_money(expected)[1:]), expected)
+        self.assertEqual(ms.format_money(None), 'Not recorded')
+        self.assertEqual(ms.format_money(0), '$0.00')
+        self.assertEqual(ms.format_money(101), '$1.01')
+        for value in ('-1', '+1', '.50', '1.', '1.001', '01.00', '1,000', '$1', '1e2', 'NaN',
+                      'Infinity', '١.٠٠', '1 0', '1\n0', 1, 1.0, True, None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ms.parse_money(value)
+        for value in (-1, True, 1.0, '1'):
+            with self.assertRaises(ValueError):
+                ms.format_money(value)
+
+    def test_computed_total_null_zero_and_forged_caller_total(self):
+        for fields, total in (({}, None), ({'labor_cost': '0.00'}, 0),
+                              ({'labor_cost': '10.10', 'parts_cost': '2.20', 'tax': '0.03'}, 1233)):
+            order = self.work_order(**fields)
+            self.assertEqual(order['total_cost_cents'], total)
+            task = self.create()
+            recorded = ms.record_service(self.path, task['task_id'], {**order, 'total_cost_cents': 999},
+                          profiles_path=self.profiles, expected_task=task, today=TODAY)
+            service = recorded['services'][0]
+            self.assertEqual(service['total_cost_cents'], total)
+            self.assertEqual(service['provider'], 'Shop é')
+            bad = deepcopy(recorded); bad['services'][0]['total_cost_cents'] = 999
+            with self.assertRaises(ValueError):
+                ms.validate_task(bad)
+            for key in ms.COST_KEYS:
+                for value in (-1, True, 1.2, '100'):
+                    bad = deepcopy(recorded); bad['services'][0][key] = value
+                    with self.assertRaises(ValueError):
+                        ms.validate_task(bad)
+
+    def legacy_task(self):
+        task = self.create()
+        legacy = {'service_id': '00000000-0000-4000-8000-000000000010',
+                  'completed_date': '2026-10-21', 'mileage': 46000, 'notes': 'Original é\nnotes'}
+        task['services'] = [legacy]
+        raw = json.dumps({'schema_version': 1, 'tasks': [task]}, ensure_ascii=False, indent=3).encode()
+        self.path.write_bytes(raw)
+        return task, legacy, raw
+
+    def test_legacy_read_write_upgrade_and_history_immutability(self):
+        task, legacy, raw = self.legacy_task()
+        self.assertEqual(ms.load_schedule(self.path)['tasks'][0], task)
+        self.assertEqual(self.path.read_bytes(), raw)
+        before_profile = self.profiles.read_bytes()
+        order = self.work_order(labor_cost='10.01')
+        with patch.object(ms.os, 'replace', side_effect=OSError('disk')), self.assertRaises(OSError):
+            ms.record_service(self.path, task['task_id'], order, profiles_path=self.profiles,
+                              expected_task=task, today=TODAY)
+        self.assertEqual(self.path.read_bytes(), raw)
+        updated = ms.record_service(self.path, task['task_id'], order, profiles_path=self.profiles,
+                                    expected_task=task, today=TODAY)
+        self.assertEqual(ms.load_schedule(self.path)['schema_version'], 2)
+        self.assertEqual(updated['services'][0], legacy)
+        self.assertEqual(set(updated['services'][0]), ms.LEGACY_SERVICE_KEYS)
+        self.assertEqual(self.profiles.read_bytes(), before_profile)
+        self.assertEqual(ms.calculate_due(updated, today=TODAY, current_mileage=48001)['next_due_mileage'], 53001)
+        history = deepcopy(updated['services'])
+        edited = ms.update_task(self.path, task['task_id'], details(title='New title'), expected_task=updated, today=TODAY)
+        self.assertEqual(edited['services'], history)
+        update_profile(self.profiles, self.profile['profile_id'], 'Renamed', '', '', '', '43000')
+        delete_profile(self.profiles, self.profile['profile_id'])
+        archived = ms.archive_task(self.path, task['task_id'], expected_task=edited)
+        self.assertEqual(archived['services'], history)
+        self.assertEqual(archived['profile_snapshot'], task['profile_snapshot'])
+        with self.assertRaises(ValueError):
+            ms.delete_task(self.path, task['task_id'], expected_task=archived)
+
+    def test_stale_partial_corrupt_unsupported_and_duplicate_data_preserved(self):
+        task = self.create(); order = self.work_order(parts_cost='1')
+        updated = ms.record_service(self.path, task['task_id'], order, profiles_path=self.profiles, expected_task=task, today=TODAY)
+        before = self.path.read_bytes()
+        with self.assertRaises(ValueError):
+            ms.record_service(self.path, task['task_id'], order, profiles_path=self.profiles, expected_task=task, today=TODAY)
+        self.assertEqual(self.path.read_bytes(), before)
+        invalids = [b'{"schema_version":2,"tasks":[],"tasks":[]}', b'{"schema_version":3,"tasks":[]}']
+        partial = deepcopy(updated); del partial['services'][0]['tax_cents']
+        invalids.append(json.dumps({'schema_version': 2, 'tasks': [partial]}).encode())
+        invalids.append(json.dumps({'schema_version': 1, 'tasks': [updated]}).encode())
+        for raw in invalids:
+            self.path.write_bytes(raw)
+            for operation in (lambda: self.create(), lambda: ms.archive_task(self.path, task['task_id'], expected_task=updated),
+                              lambda: ms.record_service(self.path, task['task_id'], order, profiles_path=self.profiles, expected_task=updated, today=TODAY)):
+                with self.assertRaises(ValueError):
+                    operation()
+                self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_cost_summary_includes_archives_and_distinguishes_snapshots(self):
+        task, legacy, _ = self.legacy_task()
+        task = ms.record_service(self.path, task['task_id'], self.work_order(labor_cost='12.34'),
+                                profiles_path=self.profiles, expected_task=task, today=TODAY)
+        ms.archive_task(self.path, task['task_id'], expected_task=task)
+        second = self.create(title='Other')
+        second = ms.record_service(self.path, second['task_id'], self.work_order(labor_cost='0.00'),
+                                  profiles_path=self.profiles, expected_task=second, today=TODAY)
+        update_profile(self.profiles, self.profile['profile_id'], 'Renamed', '', '', '', '43000')
+        third = self.create(title='New snapshot')
+        self.service(third)
+        summary = ms.summarize_costs(ms.load_schedule(self.path))
+        self.assertEqual(summary['overall'], dict(total_cost_cents=1234, service_count=4,
+                          unpriced_service_count=2, legacy_service_count=1))
+        self.assertEqual(summary['by_task'][second['task_id']]['total_cost_cents'], 0)
+        self.assertEqual(len(summary['by_vehicle']), 2)
+        self.assertEqual(sorted(s['service_count'] for s in summary['by_vehicle']), [1, 3])
+        self.assertEqual(ms.summarize_costs({'schema_version': 2, 'tasks': []})['overall']['total_cost_cents'], None)
+
+    def test_failed_service_fsync_and_invalid_work_orders_preserve_legacy(self):
+        task, _, raw = self.legacy_task()
+        order = self.work_order(labor_cost='1.23')
+        with patch.object(ms.os, 'fsync', side_effect=OSError('disk')), self.assertRaises(OSError):
+            ms.record_service(self.path, task['task_id'], order, profiles_path=self.profiles,
+                              expected_task=task, today=TODAY)
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.assertFalse(list(self.root.glob('.*.tmp')))
+        for changes in ({'provider': 'x' * 201}, {'invoice_reference': '\x00'},
+                        {'labor_cost_cents': True}, {'parts_cost_cents': 1.25}):
+            with self.assertRaises(ValueError):
+                ms.record_service(self.path, task['task_id'], {**order, **changes}, profiles_path=self.profiles,
+                                  expected_task=task, today=TODAY)
+            self.assertEqual(self.path.read_bytes(), raw)
+        recorded = ms.record_service(self.path, task['task_id'], order, profiles_path=self.profiles,
+                                     expected_task=task, today=TODAY)
+        bad = deepcopy(recorded); bad['services'][-1]['total_cost_cents'] = True
+        with self.assertRaises(ValueError):
+            ms.validate_task(bad)

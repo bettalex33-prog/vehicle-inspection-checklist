@@ -169,3 +169,59 @@ class TestMaintenanceGUI(unittest.TestCase):
         self.window.profile_selector.current(0)
         self.window.select_profile()
         self.assertEqual(self.window.mileage.get(), '')
+
+    def test_work_order_confirmation_validation_and_full_details(self):
+        task = self.create()
+        dialog = mg.RecordServiceDialog(MagicMock(), self.path, self.profiles, task, MagicMock())
+        dialog.fields['completed_date'].set('2026-10-22')
+        dialog.fields['mileage'].set('48001')
+        dialog.fields['provider'].set('Shop')
+        dialog.fields['invoice_reference'].set('Invoice 123')
+        dialog.fields['labor_cost'].set('-1')
+        before = self.path.read_bytes(); profile_before = self.profiles.read_bytes()
+        dialog.save()
+        self.showerror.assert_called_once()
+        self.askyesno.assert_not_called()
+        dialog.root.destroy.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(dialog.fields['labor_cost'].get(), '-1')
+        dialog.fields['labor_cost'].set('10.01'); dialog.fields['parts_cost'].set('0.00')
+        self.askyesno.return_value = False
+        dialog.save()
+        self.assertIn('$10.01', self.askyesno.call_args.args[1])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.askyesno.return_value = True
+        dialog.save()
+        self.select(ms.load_schedule(self.path)['tasks'][0]); self.window.show_details()
+        text = self.window.details.insert.call_args.args[1]
+        for value in ('Shop', 'Invoice 123', '$10.01', '$0.00', 'Not recorded'):
+            self.assertIn(value, text)
+        self.assertEqual(self.profiles.read_bytes(), profile_before)
+        self.assertEqual(ms.load_schedule(self.path)['tasks'][0]['services'][0]['total_cost_cents'], 1001)
+
+    def test_legacy_details_and_export_callbacks_without_windows(self):
+        import json
+        task = self.create()
+        task['services'] = [dict(service_id='00000000-0000-4000-8000-000000000099',
+                    completed_date='2026-10-22', mileage=48001, notes='Legacy')]
+        self.path.write_text(json.dumps({'schema_version': 1, 'tasks': [task]}))
+        self.select(task); self.window.show_details()
+        text = self.window.details.insert.call_args.args[1]
+        self.assertIn('Provider: Not recorded', text)
+        self.assertIn('Total Cost: Not recorded', text)
+        for callback, function, extension in ((self.window.export_csv, 'export_maintenance_csv', '.csv'),
+                                               (self.window.export_html, 'export_maintenance_html', '.html')):
+            with patch.object(mg.filedialog, 'asksaveasfilename', return_value=''), patch.object(mg, function) as export:
+                callback(); export.assert_not_called()
+            output = self.root / ('report' + extension)
+            with patch.object(mg.filedialog, 'asksaveasfilename', return_value=str(output)), patch.object(mg, function) as export, patch.object(mg.messagebox, 'showinfo'):
+                self.window.mileage.set('48001')
+                callback(); export.assert_called_once()
+                self.assertEqual(export.call_args.kwargs['current_mileages'], {self.profile['profile_id']: 48001})
+            output.write_text('existing')
+            self.askyesno.return_value = False
+            with patch.object(mg.filedialog, 'asksaveasfilename', return_value=str(output)), patch.object(mg, function) as export:
+                callback(); export.assert_not_called()
+            with patch.object(mg.filedialog, 'asksaveasfilename', return_value=str(self.path)), patch.object(mg, function) as export:
+                callback(); export.assert_not_called()
+        self.assertEqual(ms.load_schedule(self.path)['schema_version'], 1)

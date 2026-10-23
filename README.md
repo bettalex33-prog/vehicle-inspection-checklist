@@ -607,3 +607,93 @@ Maintenance tests use disposable paths, injected dates, mocked Tk widgets and
 dialogs, and no display server. CLI subprocess tests operate on a temporary copy
 of the original CLI. The backup tests cover all 15 nonempty runtime-store subsets
 and failure/rollback paths across all four destinations.
+
+### Service work orders, costs, and maintenance exports (v1.6.0)
+
+**Record Service…** now accepts a service provider and invoice/reference number,
+plus labor, parts, and tax in dollars. Provider and reference are optional text,
+trimmed and limited to 200 characters. The confirmation shows the calculated
+total before saving. Invalid input keeps the dialog, draft, and saved data intact.
+Selected-task details show every work order and its itemized costs.
+
+Enter plain nonnegative dollar amounts, such as `12`, `12.5`, or `12.50`.
+Surrounding whitespace is accepted. Signs, currency symbols, commas, exponents,
+leading zeros such as `012.50`, missing integer digits such as `.50`, trailing
+points, non-ASCII digits, NaN, infinity, and more than two decimal places are
+rejected. Values are never rounded or represented as binary floating point.
+They are stored as integer cents: `labor_cost_cents`, `parts_cost_cents`,
+`tax_cents`, and `total_cost_cents`. Reports and details format recorded values
+consistently as `$12.50`.
+
+**Blank costs mean “Not recorded”, not zero.** Blank components are JSON `null`;
+explicit `0.00` is the recorded integer `0` and displays `$0.00`. The total is
+`null` when every component is unrecorded. Otherwise it is the sum of recorded
+components, using zero for omitted components only for this calculation. Those
+components remain visibly unrecorded. Saving calculates the total internally;
+persisted totals must match the components. Provider and invoice/reference are
+stored as `provider` and `invoice_reference`, each text or `null`.
+
+Historical service records are immutable through the application. Editing a
+task or profile, deleting a profile, or archiving a task never changes existing
+work orders, costs, or captured vehicle snapshots. Tasks with any service history
+remain protected from permanent deletion. Service recording still advances the
+applicable due date/mileage and clears the appointment. **Recorded service
+mileage never updates a vehicle profile automatically.** Current evaluation
+mileage is still entered explicitly and never inferred from service history,
+inspection records, or profile mileage.
+
+The v1.5.0 schema 1 format described above remains readable. Reads, viewing,
+summaries, and exports never rewrite or upgrade a store. Original four-field
+legacy service objects retain every original key and value; missing provider,
+reference, and cost fields display **Not recorded**. No values are inferred.
+A successful maintenance write publishes schema 2, which permits both unchanged
+legacy records and complete new work-order records. Failed writes leave the
+existing bytes and schema intact. Partially populated work-order objects,
+inconsistent totals, duplicate keys, unsupported schemas, stale writes, and
+corrupt data are rejected. v1.5.0 cannot read schema 2 maintenance stores.
+
+**Export All History CSV** and **Export All History HTML** export the entire saved
+maintenance store, including archived and missing-profile tasks, regardless of
+the current table filters. The selected profile's explicitly entered evaluation
+mileage is used only for that profile; other mileage checks remain unknown.
+Exports include the evaluation date, vehicle snapshot, task configuration and
+state, both due assessments, appointments, service IDs, work-order details,
+itemized costs, totals, and unpriced-service counts. An invalid evaluation
+mileage prevents export so it cannot produce a misleading report.
+
+CSV has one row per service; tasks without services have a row marked
+`service_recorded=false`. Task fields and `task_*` summaries repeat on service
+rows: do not sum those repeated task totals. Sum `service_total_cost_cents`
+values once per service instead. Despite the storage-oriented column names,
+exported cost cells contain formatted dollars or `Not recorded`. Text cells
+with spreadsheet formula prefixes are escaped, including prefixes hidden by
+leading whitespace/control characters. HTML is a self-contained, escaped report
+with overall and per-snapshot historical cost summaries. Ordering is stable by
+profile/task ID and service date, mileage, and ID; a fixed evaluation date and
+mileage input produce deterministic output. No browser or document is opened.
+
+Exports require confirmation to replace an existing file and use a temporary
+file in the destination directory, flush/fsync, and atomic publication. Failed
+validation or writes before publication preserve the previous destination.
+Source aliases, symlinks, hard-link aliases to protected runtime stores, and
+custom supplied runtime paths are rejected. Exports never change their source.
+Use one writer at a time; filesystem checks cannot eliminate concurrent changes
+between the final alias check and publication.
+
+Pure functions in `maintenance_schedule.py` provide `task_cost_summary(task)`
+and `summarize_costs(schedule)`. Summaries contain recorded cents (or `null` when
+nothing is priced), service count, unpriced-service count, and legacy-service
+count. They include archives and validate unique service IDs to avoid counting a
+service twice. Vehicle summaries group by stable profile ID **and exact captured
+snapshot**, so later profile edits cannot relabel historical costs. Unpriced
+services are counted separately from recorded zero-cost services. A partially
+priced service contributes its recorded total while its missing components stay
+marked Not recorded.
+
+New backups use release `1.6.0` and the existing manifest version 1. They retain
+strict validation, byte-for-byte restoration, alias checks, staging, rollback,
+and recovery behavior. v1.4.0 and v1.5.0 archives still restore without fabricated
+fields or maintenance migrations; omitted stores remain untouched. Both schema
+1 and schema 2 maintenance data round-trip exactly through current backups.
+Older release manifests cannot claim schema 2 maintenance data. Existing
+checklist CLI commands and their exact outputs remain unchanged.

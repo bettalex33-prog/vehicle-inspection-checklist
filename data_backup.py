@@ -193,7 +193,7 @@ def create_backup(paths: RuntimePaths, output_dir: Path, *, timestamp=None) -> P
         raise BackupValidationError('Backup timestamp must be timezone-aware.')
     stamp = stamp.astimezone(timezone.utc)
     manifest = {'manifest_version': 1, 'application': 'vehicle-maintenance-checklist',
-                'release': '1.5.0', 'created_at': stamp.isoformat(),
+                'release': '1.6.0', 'created_at': stamp.isoformat(),
                 'files': [{'filename': name, 'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}
                           for name, payload in sorted(files)]}
     buffer = io.BytesIO()
@@ -242,7 +242,7 @@ def validate_backup(archive_path: Path) -> ValidatedBackup:
 def _validate_manifest(manifest, payloads):
     if (not isinstance(manifest, dict) or set(manifest) != {'manifest_version', 'application', 'release', 'created_at', 'files'}
             or type(manifest['manifest_version']) is not int or manifest['manifest_version'] != 1
-            or manifest['application'] != 'vehicle-maintenance-checklist' or manifest['release'] not in ('1.4.0', '1.5.0')
+            or manifest['application'] != 'vehicle-maintenance-checklist' or manifest['release'] not in ('1.4.0', '1.5.0', '1.6.0')
             or not isinstance(manifest['files'], list)):
         raise BackupValidationError('Malformed or unsupported manifest.')
     try:
@@ -253,6 +253,10 @@ def _validate_manifest(manifest, payloads):
         raise BackupValidationError('Invalid manifest timestamp.') from None
     if manifest['release'] == '1.4.0' and 'maintenance_schedule.json' in payloads:
         raise BackupValidationError('Maintenance data requires release 1.5.0.')
+    if manifest['release'] == '1.5.0' and 'maintenance_schedule.json' in payloads:
+        validate_runtime_bytes('maintenance_schedule.json', payloads['maintenance_schedule.json'])
+        if _json(payloads['maintenance_schedule.json'])['schema_version'] != 1:
+            raise BackupValidationError('Maintenance schema 2 requires release 1.6.0.')
     seen = set()
     for entry in manifest['files']:
         if not isinstance(entry, dict) or set(entry) != {'filename', 'size', 'sha256'}:
