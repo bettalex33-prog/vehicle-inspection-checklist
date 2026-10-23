@@ -18,8 +18,9 @@ import zlib
 
 from inspection_history import validate_history, validate_checklist_snapshot
 from vehicle_profiles import validate_profiles
+from maintenance_schedule import validate_schedule
 
-NAMES = ('checklist_data.json', 'inspection_history.json', 'vehicle_profiles.json')
+NAMES = ('checklist_data.json', 'inspection_history.json', 'vehicle_profiles.json', 'maintenance_schedule.json')
 MAX_FILE = 16 * 1024 * 1024
 MAX_TOTAL = 48 * 1024 * 1024
 MAX_ARCHIVE = 64 * 1024 * 1024
@@ -32,8 +33,11 @@ class RuntimePaths:
     history: Path
     profiles: Path
 
+    maintenance: Path | None = None
+
     def mapping(self):
-        return dict(zip(NAMES, (Path(self.checklist), Path(self.history), Path(self.profiles))))
+        maintenance = self.maintenance if self.maintenance is not None else Path(self.checklist).with_name("maintenance_schedule.json")
+        return dict(zip(NAMES, (Path(self.checklist), Path(self.history), Path(self.profiles), Path(maintenance))))
 
 
 @dataclass(frozen=True)
@@ -78,7 +82,7 @@ def _json(payload):
 def validate_runtime_bytes(filename: str, payload: bytes) -> None:
     if filename not in NAMES or not isinstance(payload, bytes) or len(payload) > MAX_FILE:
         raise BackupValidationError('Unknown runtime filename or oversized payload.')
-    validators = dict(zip(NAMES, (validate_checklist_snapshot, validate_history, validate_profiles)))
+    validators = dict(zip(NAMES, (validate_checklist_snapshot, validate_history, validate_profiles, validate_schedule)))
     try:
         validators[filename](_json(payload))
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as error:
@@ -189,7 +193,7 @@ def create_backup(paths: RuntimePaths, output_dir: Path, *, timestamp=None) -> P
         raise BackupValidationError('Backup timestamp must be timezone-aware.')
     stamp = stamp.astimezone(timezone.utc)
     manifest = {'manifest_version': 1, 'application': 'vehicle-maintenance-checklist',
-                'release': '1.4.0', 'created_at': stamp.isoformat(),
+                'release': '1.5.0', 'created_at': stamp.isoformat(),
                 'files': [{'filename': name, 'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}
                           for name, payload in sorted(files)]}
     buffer = io.BytesIO()
@@ -208,7 +212,7 @@ def validate_backup(archive_path: Path) -> ValidatedBackup:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             infos = archive.infolist()
             names = [info.filename for info in infos]
-            if not 2 <= len(infos) <= 4 or len(set(names)) != len(names) or 'manifest.json' not in names:
+            if not 2 <= len(infos) <= 5 or len(set(names)) != len(names) or 'manifest.json' not in names:
                 raise BackupValidationError('Missing manifest, empty backup, or duplicate members.')
             payloads = {}
             for info in infos:
@@ -238,7 +242,7 @@ def validate_backup(archive_path: Path) -> ValidatedBackup:
 def _validate_manifest(manifest, payloads):
     if (not isinstance(manifest, dict) or set(manifest) != {'manifest_version', 'application', 'release', 'created_at', 'files'}
             or type(manifest['manifest_version']) is not int or manifest['manifest_version'] != 1
-            or manifest['application'] != 'vehicle-maintenance-checklist' or manifest['release'] != '1.4.0'
+            or manifest['application'] != 'vehicle-maintenance-checklist' or manifest['release'] not in ('1.4.0', '1.5.0')
             or not isinstance(manifest['files'], list)):
         raise BackupValidationError('Malformed or unsupported manifest.')
     try:
@@ -247,6 +251,8 @@ def _validate_manifest(manifest, payloads):
             raise ValueError
     except (TypeError, ValueError):
         raise BackupValidationError('Invalid manifest timestamp.') from None
+    if manifest['release'] == '1.4.0' and 'maintenance_schedule.json' in payloads:
+        raise BackupValidationError('Maintenance data requires release 1.5.0.')
     seen = set()
     for entry in manifest['files']:
         if not isinstance(entry, dict) or set(entry) != {'filename', 'size', 'sha256'}:
@@ -275,7 +281,7 @@ def _fingerprint(path):
 def restore_backup(backup: ValidatedBackup, paths: RuntimePaths, *, confirmed=False) -> RestoreResult:
     if confirmed is not True:
         raise BackupValidationError('Restore requires explicit confirmation.')
-    if not isinstance(backup, ValidatedBackup) or not backup.files or len(backup.files) > 3:
+    if not isinstance(backup, ValidatedBackup) or not backup.files or len(backup.files) > 4:
         raise BackupValidationError('Invalid or empty backup.')
     payloads = {}
     for name, payload in backup.files:

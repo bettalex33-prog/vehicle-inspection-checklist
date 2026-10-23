@@ -460,3 +460,150 @@ file. Review retained draft values before saving another inspection.
 project are not covered by those directory rules: do not stage them. All filesystem
 tests use injected paths under `TemporaryDirectory`; GUI tests mock widgets,
 windows, and dialogs and never open exported documents.
+
+### Maintenance Due and Service Scheduling (v1.5.0)
+
+Open **Maintenance…** from the checklist. This feature uses only the Python
+standard library and stores data separately in `/maintenance_schedule.json`,
+which Git ignores. Viewing a missing schedule does not create it. Checklist CLI
+commands and existing inspection, profile, HTML, and CSV formats are unchanged.
+There is no migration or automatic conversion of inspection findings to tasks.
+
+Select a saved profile, then **New Task…**. Enter a title, notes, an enabled state,
+and an interval in days, miles, or both. Leave unused intervals and their warning
+fields blank. Warnings are nonnegative and no larger than the matching interval;
+30 days and 500 miles are typical choices. The new-task form starts with a
+180-day interval and a 30-day warning. Baseline date/mileage represent the last
+service or an explicitly chosen starting point. A date baseline is required for
+a date interval; a mileage baseline is required for a mileage interval. An unused
+axis may have a blank baseline. Days are elapsed calendar days, not months.
+
+Each task captures a separate, immutable snapshot of its profile at creation.
+The table identifies vehicles using that snapshot. Editing or deleting a profile
+never changes the snapshot, task, or service history. **Missing profiles** shows
+orphaned tasks; these remain viewable and editable, but cannot record new service
+until their original profile ID exists again. A recreated profile with the same
+name has a different ID and does not reconnect a task.
+
+**Evaluate / Refresh** reloads saved tasks and profiles. Select a profile and
+explicitly enter current mileage for the evaluation. Selecting a profile clears
+this input; profile mileage and inspection records never prefill it. This input
+never updates a profile or inspection. Mileage cannot be below a task's latest
+service anchor. **All profiles** evaluates dates and marks
+applicable mileage checks as unknown; it does not combine mileage across
+vehicles or infer current mileage from inspection records.
+
+The last recorded service anchors the next due date and mileage. Before any
+service, the baseline anchors them. Due date is anchor date plus interval days;
+due mileage is anchor mileage plus interval miles. Either axis can trigger:
+
+| Status | Meaning |
+| --- | --- |
+| Overdue | At least one threshold has been exceeded |
+| Due | At least one threshold equals today/current mileage |
+| Due soon | Within either warning distance, with no Due or Overdue result |
+| Upcoming | All applicable checks are known and beyond warning distances |
+| Mileage needed | Mileage is unknown and no urgent date result applies |
+| Disabled | Task is disabled |
+| Archived | Task is archived and disabled |
+
+Details show both axis assessments, remaining days/miles, the mileage-unknown
+flag, baseline, intervals, appointment, snapshot, and complete service history.
+Dates use the machine's local calendar date. New dates use `YYYY-MM-DD`.
+An optional appointment is independent of due status: scheduling does not reset
+thresholds. Past appointments remain visible and are marked as passed.
+
+**Record Service…** requires completion date, mileage, and optional notes.
+Confirming appends a service with a unique ID, advances both applicable
+thresholds, and clears the appointment in one schedule write. Service dates may
+not be in the future. Dates and mileage must be nondecreasing from the baseline
+through all services; equal values are allowed. Baselines become read-only once
+service is recorded. If a previously unused axis has no baseline, that interval
+cannot be added after service has been recorded. Task title, notes, intervals,
+warnings, enabled state, and appointment can otherwise be edited.
+
+**Delete / Archive…** asks for confirmation. A task without services can be
+permanently deleted. A task with any services can only be archived and disabled;
+its entire history and snapshot remain. The default **Active** view excludes
+archived tasks. Select **Archived** to inspect them. Archived tasks with services
+are read-only and cannot be deleted through the application. Disabling an active
+task is reversible by editing it; archival has no reactivation control in v1.5.0.
+
+Task titles are trimmed, nonempty, and limited to 200 characters. Task/service
+notes are limited to 10,000 characters. These text fields reject NUL. Mileage and
+warnings are whole nonnegative numbers, intervals are positive, and numeric
+booleans are rejected. IDs are canonical UUID strings. Saved objects require
+exact fields, unique task/service IDs, valid normalized profile snapshots, and
+schema version 1. Malformed UTF-8, duplicate JSON keys, nonfinite constants,
+unsupported versions, impossible dates, and date arithmetic overflow are
+rejected without repairing or overwriting the data. Corrupt maintenance data
+disables maintenance actions while existing checklist/inspection actions remain
+available. Correct the file or restore a valid backup, then refresh.
+
+The exact schedule shape is illustrated below. All keys are required; unused
+values are JSON `null`. `profile_snapshot` contains the five profile detail
+fields, with its ID stored separately. Calculated due results are never saved.
+
+```json
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "task_id": "72a7f52a-a464-4471-bc43-998ffea1dcc2",
+      "profile_id": "f70f8899-4da5-4636-9660-0edf9c1d094a",
+      "profile_snapshot": {
+        "vehicle_name": "Unit 12",
+        "year": null,
+        "make": "",
+        "model": "",
+        "mileage": 42000
+      },
+      "title": "Oil and filter",
+      "notes": "",
+      "enabled": true,
+      "archived": false,
+      "interval_days": 180,
+      "interval_miles": 5000,
+      "warning_days": 30,
+      "warning_miles": 500,
+      "baseline_date": "2026-04-25",
+      "baseline_mileage": 42000,
+      "scheduled_date": null,
+      "services": [
+        {
+          "service_id": "5f5305c8-6236-465f-aa92-edf984e369de",
+          "completed_date": "2026-10-22",
+          "mileage": 46500,
+          "notes": "Oil and filter replaced"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Backup compatibility:** new backups use manifest version 1 and release 1.5.0,
+with up to four runtime stores plus the manifest. Existing 1.4.0 backups still
+restore; their omitted maintenance store is left untouched. A maintenance-only
+backup is valid, including tasks whose profiles are absent. New backups preserve
+all source bytes and snapshots. The previous limits remain: 16 MiB per runtime
+store, 48 MiB combined, 64 MiB archive, and 64 KiB manifest. v1.4.0 applications
+cannot read v1.5.0 backups. Output alias checks include maintenance data, including
+custom GUI paths, so inspection exports cannot overwrite it.
+
+Schedule edits validate first, write a same-directory temporary file, flush and
+fsync it, check for changed original bytes, then publish with `os.replace`.
+Temporary files are cleaned after success or failure; a failed write preserves
+the original store. Symlink destinations, hard-linked schedule stores, special
+files, and aliases to other runtime files are rejected. Stale selected-task
+edits are refused; changes to unrelated tasks are retained. These checks reduce
+conflicts but do not eliminate the final race with another process: use one
+writer at a time. Restore retains the existing per-file atomic replacement and
+rollback/recovery behavior, rather than a multi-file power-loss guarantee.
+Open maintenance views refresh after successful restore. Unsaved editor text is
+retained; saves against changed tasks require refreshing and reopening the editor.
+
+Maintenance tests use disposable paths, injected dates, mocked Tk widgets and
+dialogs, and no display server. CLI subprocess tests operate on a temporary copy
+of the original CLI. The backup tests cover all 15 nonempty runtime-store subsets
+and failure/rollback paths across all four destinations.

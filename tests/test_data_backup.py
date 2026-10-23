@@ -33,14 +33,15 @@ class TestBackup(unittest.TestCase):
         self.samples = {
             db.NAMES[0]: json.dumps(create_default_data(), indent=4).encode(),
             db.NAMES[1]: json.dumps({'schema_version': 2, 'inspections': [record()]}, indent=3).encode(),
-            db.NAMES[2]: b'{"schema_version": 1, "profiles": []}\n'}
+            db.NAMES[2]: b'{"schema_version": 1, "profiles": []}\n',
+            db.NAMES[3]: b'{"schema_version": 1, "tasks": []}\n'}
 
     def populate(self, names=None):
         for name in self.samples if names is None else names:
             self.mapping[name].write_bytes(self.samples[name])
 
     def manifest(self, payloads):
-        return dict(manifest_version=1, application='vehicle-maintenance-checklist', release='1.4.0',
+        return dict(manifest_version=1, application='vehicle-maintenance-checklist', release='1.5.0',
                     created_at=self.stamp.isoformat(), files=[dict(filename=n, size=len(p), sha256=hashlib.sha256(p).hexdigest()) for n, p in sorted(payloads.items())])
 
     def archive(self, payloads=None, manifest=None, extras=(), compression=zipfile.ZIP_DEFLATED):
@@ -57,7 +58,7 @@ class TestBackup(unittest.TestCase):
         return path
 
     def test_all_subsets_roundtrip_and_omissions(self):
-        for mask in range(1, 8):
+        for mask in range(1, 16):
             with self.subTest(mask=mask):
                 for path in self.mapping.values():
                     path.unlink(missing_ok=True)
@@ -169,7 +170,7 @@ class TestBackup(unittest.TestCase):
             db.reject_output_alias(self.paths.checklist, self.mapping.values())
 
     def test_replacement_failures_rollback_originals_and_absence(self):
-        for failing_index in (1, 2, 3):
+        for failing_index in (1, 2, 3, 4):
             for originally_present in (False, True):
                 with self.subTest(index=failing_index, present=originally_present):
                     for p in self.mapping.values():
@@ -223,7 +224,7 @@ class TestBackup(unittest.TestCase):
         with patch.object(db.os, 'replace', side_effect=failing), self.assertRaises(db.RestoreError) as caught:
             db.restore_backup(db.ValidatedBackup('', tuple(self.samples.items())), self.paths, confirmed=True)
         recovery = list(self.root.glob('.*.recovery'))
-        self.assertEqual(len(recovery), 3)
+        self.assertEqual(len(recovery), 4)
         for path in recovery:
             self.assertIn(str(path), str(caught.exception))
         self.assertIn('rollback incomplete', str(caught.exception))
@@ -268,7 +269,7 @@ class TestBackup(unittest.TestCase):
         self.populate()
         originals = {n: p.read_bytes() for n, p in self.mapping.items()}
         actual = db.os.fsync
-        for failing_call in range(1, 7):
+        for failing_call in range(1, 9):
             count = 0
             def fsync(descriptor):
                 nonlocal count
@@ -289,3 +290,57 @@ class TestBackup(unittest.TestCase):
         with self.assertRaises(ValueError):
             db.restore_backup(validated, aliased, confirmed=True)
         self.assertEqual(validated.source_path.read_bytes(), before)
+
+    def test_legacy_release_retains_maintenance_and_rejects_new_member(self):
+        self.populate()
+        legacy = {name: payload for name, payload in self.samples.items() if name != db.NAMES[3]}
+        manifest = self.manifest(legacy); manifest['release'] = '1.4.0'
+        archive = self.archive(legacy, manifest)
+        before = self.paths.maintenance if self.paths.maintenance else self.mapping[db.NAMES[3]]
+        original = before.read_bytes()
+        backup = db.validate_backup(archive)
+        result = db.restore_backup(backup, self.paths, confirmed=True)
+        self.assertIn(db.NAMES[3], result.retained)
+        self.assertEqual(before.read_bytes(), original)
+        manifest = self.manifest(self.samples); manifest['release'] = '1.4.0'
+        with self.assertRaises(ValueError):
+            db.validate_backup(self.archive(manifest=manifest))
+
+    def test_invalid_maintenance_and_total_limit(self):
+        malformed = {db.NAMES[3]: b'{"schema_version":1,"tasks":[{}]}'}
+        with self.assertRaises(ValueError):
+            db.validate_backup(self.archive(malformed))
+        self.populate()
+        with patch.object(db, 'MAX_TOTAL', 1), self.assertRaises(ValueError):
+            db.create_backup(self.paths, self.root)
+
+    def test_custom_maintenance_path_and_output_alias(self):
+        custom = self.root / 'custom-maintenance.json'
+        paths = db.RuntimePaths(self.paths.checklist, self.paths.history, self.paths.profiles, custom)
+        custom.write_bytes(self.samples[db.NAMES[3]])
+        archive = db.create_backup(paths, self.root, timestamp=self.stamp)
+        validated = db.validate_backup(archive)
+        self.assertEqual(dict(validated.files), {db.NAMES[3]: custom.read_bytes()})
+        with self.assertRaises(ValueError):
+            db.reject_output_alias(custom, paths.mapping().values())
+        db.restore_backup(validated, paths, confirmed=True)
+        self.assertFalse(self.mapping[db.NAMES[3]].exists())
+
+    def test_snapshot_and_archived_history_bytes_roundtrip_without_profile(self):
+        from maintenance_schedule import create_task, record_service, archive_task
+        from vehicle_profiles import create_profile
+        from test_maintenance_schedule import details, TODAY
+        profile = create_profile(self.paths.profiles, 'Original', '', '', '', '42000')
+        task = create_task(self.mapping[db.NAMES[3]], profile['profile_id'], details(),
+                           profiles_path=self.paths.profiles, today=TODAY)
+        task = record_service(self.mapping[db.NAMES[3]], task['task_id'],
+                              dict(completed_date='2026-10-22', mileage=46500, notes='é done'),
+                              profiles_path=self.paths.profiles, expected_task=task, today=TODAY)
+        archive_task(self.mapping[db.NAMES[3]], task['task_id'], expected_task=task)
+        self.paths.profiles.unlink()
+        original = self.mapping[db.NAMES[3]].read_bytes()
+        archive = db.create_backup(self.paths, self.root, timestamp=self.stamp)
+        self.mapping[db.NAMES[3]].unlink()
+        db.restore_backup(db.validate_backup(archive), self.paths, confirmed=True)
+        self.assertEqual(self.mapping[db.NAMES[3]].read_bytes(), original)
+        self.assertFalse(self.paths.profiles.exists())

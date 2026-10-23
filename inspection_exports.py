@@ -84,12 +84,13 @@ def render_history_csv(history: dict) -> str:
     return '\ufeff' + stream.getvalue()
 
 
-def export_inspection_html(record: dict, output_path: Path, *, schema_version: int, overwrite=False) -> Path:
-    from data_backup import write_output
+def export_inspection_html(record: dict, output_path: Path, *, schema_version: int, overwrite=False, runtime_paths=()) -> Path:
+    from data_backup import write_output, reject_output_alias
+    reject_output_alias(output_path, runtime_paths)
     return write_output(output_path, render_inspection_html(record, schema_version=schema_version).encode('utf-8'), overwrite=overwrite)
 
 
-def export_history_csv(history_path: Path, output_path: Path, *, overwrite=False) -> Path:
+def export_history_csv(history_path: Path, output_path: Path, *, overwrite=False, runtime_paths=()) -> Path:
     from data_backup import write_output, reject_output_alias
-    reject_output_alias(output_path, (history_path,))
+    reject_output_alias(output_path, (history_path, *runtime_paths))
     return write_output(output_path, render_history_csv(load_history(history_path)).encode('utf-8'), overwrite=overwrite)

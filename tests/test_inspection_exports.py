@@ -104,3 +104,44 @@ class TestExports(unittest.TestCase):
             export_history_csv(history, history)
         with self.assertRaises(ValueError):
             export_inspection_html(self.record, self.directory / 'vehicle_profiles.json', schema_version=2)
+
+
+class TestMaintenanceExportAliases(unittest.TestCase):
+    def test_maintenance_and_link_aliases_preserved(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            schedule = root / 'maintenance_schedule.json'
+            schedule.write_bytes(b'original maintenance bytes')
+            for output in (schedule, root / 'link.html', root / 'hard.csv'):
+                if output.name == 'link.html':
+                    output.symlink_to(schedule)
+                elif output.name == 'hard.csv':
+                    os.link(schedule, output)
+                # GUI guards aliases to every runtime path before exporting.
+                from data_backup import reject_output_alias
+                with self.assertRaises(ValueError):
+                    reject_output_alias(output, [schedule])
+            with self.assertRaises(ValueError):
+                export_inspection_html(record(), schedule, schema_version=2, overwrite=True)
+            with self.assertRaises(ValueError):
+                export_history_csv(root / 'inspection_history.json', schedule, overwrite=True)
+            self.assertEqual(schedule.read_bytes(), b'original maintenance bytes')
+
+
+    def test_custom_maintenance_store_protected_by_export_functions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            custom = root / 'custom-maintenance.json'
+            custom.write_bytes(b'preserve me')
+            with self.assertRaises(ValueError):
+                export_inspection_html(record(), custom, schema_version=2, overwrite=True,
+                                       runtime_paths=(custom,))
+            with self.assertRaises(ValueError):
+                export_history_csv(root / 'inspection_history.json', custom, overwrite=True,
+                                   runtime_paths=(custom,))
+            self.assertEqual(custom.read_bytes(), b'preserve me')
+
+
+if __name__ == "__main__":
+    unittest.main()

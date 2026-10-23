@@ -14,6 +14,7 @@ from inspection_history import (create_inspection_record, append_inspection, loa
 from data_backup import (RuntimePaths, create_backup, validate_backup, restore_backup,
                          reject_output_alias)
 from inspection_exports import export_inspection_html, export_history_csv
+from maintenance_gui import MaintenanceWindow
 
 from vehicle_profiles import load_profiles, create_profile, update_profile, delete_profile
 
@@ -32,13 +33,16 @@ DATA_PATH = Path(__file__).resolve().parent / "checklist_data.json"
 class ChecklistApp:
     """Display checklist state and delegate changes to the checklist module."""
 
-    def __init__(self, root, data_path=DATA_PATH, history_path=None, profiles_path=None):
+    def __init__(self, root, data_path=DATA_PATH, history_path=None, profiles_path=None, maintenance_path=None):
         self.root = root
         self.data_path = data_path
         self.history_path = (Path(history_path) if history_path is not None else
                              Path(data_path).with_name("inspection_history.json"))
         self.profiles_path = (Path(profiles_path) if profiles_path is not None else
                               Path(data_path).with_name("vehicle_profiles.json"))
+        self.maintenance_path = (Path(maintenance_path) if maintenance_path is not None else
+                                 Path(data_path).with_name("maintenance_schedule.json"))
+        self.maintenance_windows = []
         self.history_windows = []
         self.profiles = []
         self.active_profile = None
@@ -99,6 +103,7 @@ class ChecklistApp:
         for label, command in (
             ("Save Inspection", self.save_inspection),
             ("History", self.open_history),
+            ("Maintenance…", self.open_maintenance),
             ("Refresh", self.refresh),
             ("Reset All", self.reset_all),
             ("Backup All Data", self.backup_all_data),
@@ -205,8 +210,11 @@ class ChecklistApp:
         window.runtime_paths = self.runtime_paths()
         self.history_windows.append(window)
 
+    def open_maintenance(self):
+        self.maintenance_windows.append(MaintenanceWindow(self.root, self.maintenance_path, self.profiles_path))
+
     def runtime_paths(self):
-        return RuntimePaths(Path(self.data_path), self.history_path, self.profiles_path)
+        return RuntimePaths(Path(self.data_path), self.history_path, self.profiles_path, self.maintenance_path)
 
     def backup_all_data(self):
         directory = filedialog.askdirectory(title="Backup All Data", parent=self.root,
@@ -243,6 +251,9 @@ class ChecklistApp:
         try:
             self.refresh(create_missing=False)
             self.reload_profiles()
+            for window in self.maintenance_windows:
+                if window.root.winfo_exists():
+                    window.refresh()
             for window in self.history_windows:
                 if window.root.winfo_exists():
                     window.refresh()
@@ -460,7 +471,8 @@ class HistoryWindow:
                 return
             path, overwrite = destination
             export_inspection_html(self.records[int(selection[0])], path,
-                                   schema_version=self.schema_version, overwrite=overwrite)
+                                   schema_version=self.schema_version, overwrite=overwrite,
+                                   runtime_paths=tuple(self.runtime_paths.mapping().values()))
         except (ValueError, OSError, IndexError) as error:
             messagebox.showerror("Export Selected Report", str(error), parent=self.root)
             return
@@ -472,7 +484,8 @@ class HistoryWindow:
             if destination is None:
                 return
             path, overwrite = destination
-            export_history_csv(self.history_path, path, overwrite=overwrite)
+            export_history_csv(self.history_path, path, overwrite=overwrite,
+                               runtime_paths=tuple(self.runtime_paths.mapping().values()))
         except (ValueError, OSError) as error:
             messagebox.showerror("Export History CSV", str(error), parent=self.root)
             return

@@ -47,7 +47,7 @@ class TestChecklistGUI(unittest.TestCase):
                 complete.assert_called_once_with(item_id)
         buttons = {call.kwargs["text"]: call.kwargs["command"]
                    for call in self.widgets["Button"].call_args_list}
-        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup"})
+        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup", "Maintenance…"})
         self.assertEqual(buttons["Save Inspection"], self.app.save_inspection)
         self.assertEqual(buttons["History"], self.app.open_history)
         self.assertEqual(buttons["Refresh"], self.app.refresh)
@@ -134,6 +134,23 @@ class TestChecklistGUI(unittest.TestCase):
     def test_history_path_defaults_beside_injected_data(self):
         app = gui.ChecklistApp(self.root, self.data_path)
         self.assertEqual(app.history_path, self.history_path)
+
+    def test_maintenance_paths_button_and_custom_export_alias(self):
+        custom = self.data_path.parent / "custom-schedule.json"
+        app = gui.ChecklistApp(self.root, self.data_path, maintenance_path=custom)
+        self.assertEqual(app.runtime_paths().mapping()["maintenance_schedule.json"], custom)
+        with patch.object(gui, "MaintenanceWindow") as window:
+            app.open_maintenance()
+            window.assert_called_once_with(self.root, custom, app.profiles_path)
+            self.assertEqual(app.maintenance_windows, [window.return_value])
+        history = gui.HistoryWindow(self.root, self.history_path)
+        history.runtime_paths = app.runtime_paths()
+        custom.write_bytes(b"preserve custom schedule")
+        with patch.object(gui.filedialog, "asksaveasfilename", return_value=str(custom)), patch.object(gui.messagebox, "showerror") as error, patch.object(gui, "export_history_csv") as export:
+            history.export_history_csv()
+            error.assert_called_once()
+            export.assert_not_called()
+        self.assertEqual(custom.read_bytes(), b"preserve custom schedule")
 
     def test_open_history_uses_injected_path(self):
         with patch.object(gui, "HistoryWindow") as window:
@@ -438,6 +455,8 @@ class TestReleaseActions(unittest.TestCase):
         from data_backup import ValidatedBackup
         window = MagicMock()
         self.app.history_windows.append(window)
+        maintenance = MagicMock()
+        self.app.maintenance_windows.append(maintenance)
         draft = (self.app.vehicle_name.get(), self.app.mileage.get(), self.app.notes.get(),
                  self.app.assessment.get(), self.app.findings.copy())
         self.data_path.unlink()
@@ -447,6 +466,7 @@ class TestReleaseActions(unittest.TestCase):
             self.assertTrue(restore.call_args.kwargs['confirmed'])
         self.assertFalse(self.data_path.exists())
         window.refresh.assert_called_once()
+        maintenance.refresh.assert_called_once()
         self.assertEqual((self.app.vehicle_name.get(), self.app.mileage.get(), self.app.notes.get(), self.app.assessment.get(), self.app.findings), draft)
         self.app.progress.set.assert_called_with('Progress: [░░░░░░░] 0/7 (0%)')
 
@@ -480,7 +500,8 @@ class TestReleaseActions(unittest.TestCase):
         output = self.data_path.parent / 'history.csv'
         with patch.object(gui.filedialog, 'asksaveasfilename', return_value=str(output)), patch.object(gui, 'export_history_csv') as export, patch.object(gui.messagebox, 'showinfo'):
             window.export_history_csv()
-            export.assert_called_once_with(self.history_path, output, overwrite=False)
+            export.assert_called_once_with(self.history_path, output, overwrite=False,
+                                           runtime_paths=tuple(window.runtime_paths.mapping().values()))
 
 
 if __name__ == "__main__":
