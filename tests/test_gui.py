@@ -47,7 +47,7 @@ class TestChecklistGUI(unittest.TestCase):
                 complete.assert_called_once_with(item_id)
         buttons = {call.kwargs["text"]: call.kwargs["command"]
                    for call in self.widgets["Button"].call_args_list}
-        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles"})
+        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup"})
         self.assertEqual(buttons["Save Inspection"], self.app.save_inspection)
         self.assertEqual(buttons["History"], self.app.open_history)
         self.assertEqual(buttons["Refresh"], self.app.refresh)
@@ -404,6 +404,83 @@ class TestChecklistGUI(unittest.TestCase):
         callback.assert_not_called()
         window.root.destroy.assert_not_called()
         self.assertFalse(path.exists())
+
+
+
+
+class TestReleaseActions(unittest.TestCase):
+    """Use the same mocked widgets and injected temporary stores as legacy tests."""
+
+    setUp = TestChecklistGUI.setUp
+
+    def test_backup_cancel_and_success(self):
+        with patch.object(gui.filedialog, 'askdirectory', return_value=''), patch.object(gui, 'create_backup') as create:
+            self.app.backup_all_data()
+            create.assert_not_called()
+        with patch.object(gui.filedialog, 'askdirectory', return_value=str(self.data_path.parent)), patch.object(gui, 'create_backup', return_value=self.data_path.parent / 'backup.zip') as create, patch.object(gui.messagebox, 'showinfo'):
+            self.app.backup_all_data()
+            create.assert_called_once_with(self.app.runtime_paths(), self.data_path.parent)
+
+    def test_restore_cancel_invalid_and_decline(self):
+        from data_backup import ValidatedBackup
+        with patch.object(gui.filedialog, 'askopenfilename', return_value=''), patch.object(gui, 'validate_backup') as validate:
+            self.app.restore_backup()
+            validate.assert_not_called()
+        with patch.object(gui.filedialog, 'askopenfilename', return_value=str(self.data_path.parent / 'input.zip')), patch.object(gui, 'validate_backup', side_effect=ValueError('bad archive')), patch.object(gui.messagebox, 'askyesno') as confirm, patch.object(gui.messagebox, 'showerror') as error:
+            self.app.restore_backup()
+            confirm.assert_not_called(); error.assert_called_once()
+        with patch.object(gui.filedialog, 'askopenfilename', return_value=str(self.data_path.parent / 'input.zip')), patch.object(gui, 'validate_backup', return_value=ValidatedBackup('', (('vehicle_profiles.json', b'{}'),))), patch.object(gui.messagebox, 'askyesno', return_value=False) as confirm, patch.object(gui, 'restore_backup') as restore:
+            self.app.restore_backup()
+            restore.assert_not_called()
+            self.assertIn('Leave untouched: checklist_data.json, inspection_history.json', confirm.call_args.args[1])
+
+    def test_successful_restore_retains_draft_and_refreshes_views(self):
+        from data_backup import ValidatedBackup
+        window = MagicMock()
+        self.app.history_windows.append(window)
+        draft = (self.app.vehicle_name.get(), self.app.mileage.get(), self.app.notes.get(),
+                 self.app.assessment.get(), self.app.findings.copy())
+        self.data_path.unlink()
+        with patch.object(gui.filedialog, 'askopenfilename', return_value=str(self.data_path.parent / 'input.zip')), patch.object(gui, 'validate_backup', return_value=ValidatedBackup('', (('vehicle_profiles.json', b'{}'),))), patch.object(gui.messagebox, 'askyesno', return_value=True), patch.object(gui, 'restore_backup') as restore, patch.object(gui.messagebox, 'showinfo'), patch.object(gui, 'load_data', side_effect=AssertionError('must not create missing checklist')):
+            self.app.restore_backup()
+            restore.assert_called_once()
+            self.assertTrue(restore.call_args.kwargs['confirmed'])
+        self.assertFalse(self.data_path.exists())
+        window.refresh.assert_called_once()
+        self.assertEqual((self.app.vehicle_name.get(), self.app.mileage.get(), self.app.notes.get(), self.app.assessment.get(), self.app.findings), draft)
+        self.app.progress.set.assert_called_with('Progress: [░░░░░░░] 0/7 (0%)')
+
+    def test_report_selection_cancel_and_overwrite(self):
+        window = gui.HistoryWindow(self.root, self.history_path)
+        window.tree.selection.return_value = ()
+        with patch.object(gui.filedialog, 'asksaveasfilename') as dialog, patch.object(gui.messagebox, 'showinfo'):
+            window.export_selected_report()
+            dialog.assert_not_called()
+        window.records = [create_inspection_record('Unit', '1', '', create_default_data(), findings=create_default_findings(), assessment='Ready for service')]
+        window.schema_version = 2
+        window.tree.selection.return_value = ('0',)
+        with patch.object(gui.filedialog, 'asksaveasfilename', return_value=''), patch.object(gui, 'export_inspection_html') as export:
+            window.export_selected_report()
+            export.assert_not_called()
+        output = self.data_path.parent / 'report.html'
+        output.write_text('old')
+        for approved in (False, True):
+            with patch.object(gui.filedialog, 'asksaveasfilename', return_value=str(output)), patch.object(gui.messagebox, 'askyesno', return_value=approved), patch.object(gui, 'export_inspection_html') as export, patch.object(gui.messagebox, 'showinfo'):
+                window.export_selected_report()
+                self.assertEqual(export.call_count, int(approved))
+                if approved:
+                    self.assertTrue(export.call_args.kwargs['overwrite'])
+        self.assertEqual(output.read_text(), 'old')
+
+    def test_csv_alias_error_and_success(self):
+        window = gui.HistoryWindow(self.root, self.history_path)
+        with patch.object(gui.filedialog, 'asksaveasfilename', return_value=str(self.data_path)), patch.object(gui, 'export_history_csv') as export, patch.object(gui.messagebox, 'showerror') as error:
+            window.export_history_csv()
+            export.assert_not_called(); error.assert_called_once()
+        output = self.data_path.parent / 'history.csv'
+        with patch.object(gui.filedialog, 'asksaveasfilename', return_value=str(output)), patch.object(gui, 'export_history_csv') as export, patch.object(gui.messagebox, 'showinfo'):
+            window.export_history_csv()
+            export.assert_called_once_with(self.history_path, output, overwrite=False)
 
 
 if __name__ == "__main__":

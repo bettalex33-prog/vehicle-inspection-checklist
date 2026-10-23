@@ -3,3 +3,5 @@ __pycache__/
 checklist_data.json
 inspection_history.json
 vehicle_profiles.json
+/exports/
+/backups/

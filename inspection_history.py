@@ -187,3 +187,17 @@ def append_inspection(history_path, record):
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def validate_checklist_snapshot(items: dict) -> dict:
+    """Validate persisted checklist structure without creating or normalizing data."""
+    _validate_items(items)
+    return deepcopy(items)
+
+
+def validate_inspection_record(record: dict, *, schema_version: int) -> dict:
+    """Validate a saved record with the same rules as its history envelope."""
+    if type(schema_version) is not int or schema_version not in (1, 2, 3):
+        raise ValueError("Unsupported history schema.")
+    _validate_record(record, schema_version=schema_version)
+    return deepcopy(record)

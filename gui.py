@@ -5,11 +5,15 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from tkinter import ttk
 
 from inspection_history import (create_inspection_record, append_inspection, load_history,
                                 create_default_findings, validate_findings, CONDITIONS, ASSESSMENTS)
+
+from data_backup import (RuntimePaths, create_backup, validate_backup, restore_backup,
+                         reject_output_alias)
+from inspection_exports import export_inspection_html, export_history_csv
 
 from vehicle_profiles import load_profiles, create_profile, update_profile, delete_profile
 
@@ -35,6 +39,7 @@ class ChecklistApp:
                              Path(data_path).with_name("inspection_history.json"))
         self.profiles_path = (Path(profiles_path) if profiles_path is not None else
                               Path(data_path).with_name("vehicle_profiles.json"))
+        self.history_windows = []
         self.profiles = []
         self.active_profile = None
         self.profiles_available = False
@@ -96,6 +101,8 @@ class ChecklistApp:
             ("History", self.open_history),
             ("Refresh", self.refresh),
             ("Reset All", self.reset_all),
+            ("Backup All Data", self.backup_all_data),
+            ("Restore Backup", self.restore_backup),
             ("Close", root.destroy),
         ):
             tk.Button(buttons, text=label, command=command).pack(
@@ -194,11 +201,60 @@ class ChecklistApp:
         self.findings = validate_findings(findings)
 
     def open_history(self):
-        HistoryWindow(self.root, self.history_path)
+        window = HistoryWindow(self.root, self.history_path)
+        window.runtime_paths = self.runtime_paths()
+        self.history_windows.append(window)
 
-    def refresh(self):
+    def runtime_paths(self):
+        return RuntimePaths(Path(self.data_path), self.history_path, self.profiles_path)
+
+    def backup_all_data(self):
+        directory = filedialog.askdirectory(title="Backup All Data", parent=self.root,
+                                            initialdir=str(Path(self.data_path).parent / "backups"))
+        if not directory:
+            return
+        try:
+            output = create_backup(self.runtime_paths(), Path(directory))
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Backup All Data", str(error), parent=self.root)
+            return
+        messagebox.showinfo("Backup All Data", f"Backup saved: {output}", parent=self.root)
+
+    def restore_backup(self):
+        archive = filedialog.askopenfilename(title="Restore Backup", parent=self.root,
+                                             filetypes=[("ZIP backup", "*.zip")])
+        if not archive:
+            return
+        try:
+            reject_output_alias(archive, self.runtime_paths().mapping().values())
+            backup = validate_backup(Path(archive))
+            included = [name for name, _ in backup.files]
+            retained = [name for name in self.runtime_paths().mapping() if name not in included]
+            warning = ("Replace/create: " + ", ".join(included) +
+                       "\nLeave untouched: " + (", ".join(retained) or "none") +
+                       "\nCurrent contents of included files will be replaced. Make a current backup first."
+                       "\nPower loss or rollback failure can prevent complete recovery. Restore now?")
+            if not messagebox.askyesno("Restore Backup", warning, parent=self.root):
+                return
+            restore_backup(backup, self.runtime_paths(), confirmed=True)
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Restore Backup", str(error), parent=self.root)
+            return
+        try:
+            self.refresh(create_missing=False)
+            self.reload_profiles()
+            for window in self.history_windows:
+                if window.root.winfo_exists():
+                    window.refresh()
+        except (ValueError, OSError, tk.TclError) as error:
+            messagebox.showerror("Restore Backup", f"Data restored, but view refresh failed: {error}", parent=self.root)
+            return
+        messagebox.showinfo("Restore Backup", "Restore completed. Omitted files were left untouched.", parent=self.root)
+
+    def refresh(self, *, create_missing=True):
         """Reload shared state, including changes made through the CLI."""
-        data = load_data(self.data_path)
+        data = (load_data(self.data_path) if create_missing or Path(self.data_path).exists()
+                else create_default_data())
         for item_id, variable in self.variables.items():
             complete = data[item_id]["complete"]
             variable.set(complete)
@@ -325,7 +381,10 @@ class HistoryWindow:
     """Read-only saved inspection list with snapshot details."""
 
     def __init__(self, parent, history_path):
-        self.history_path = history_path
+        self.history_path = Path(history_path)
+        self.runtime_paths = RuntimePaths(self.history_path.with_name("checklist_data.json"),
+                                          self.history_path, self.history_path.with_name("vehicle_profiles.json"))
+        self.schema_version = 1
         self.root = tk.Toplevel(parent)
         self.root.title("Inspection History")
         self.records = []
@@ -342,6 +401,8 @@ class HistoryWindow:
         self.details.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.details.pack(side="left", fill="both", expand=True)
+        tk.Button(self.root, text="Export Selected Report", command=self.export_selected_report).pack()
+        tk.Button(self.root, text="Export History CSV", command=self.export_history_csv).pack()
         tk.Button(self.root, text="Refresh", command=self.refresh).pack()
         tk.Button(self.root, text="Close", command=self.root.destroy).pack()
         self.refresh()
@@ -354,10 +415,13 @@ class HistoryWindow:
 
     def refresh(self):
         try:
-            records = load_history(self.history_path)["inspections"]
+            history = load_history(self.history_path)
+            self.schema_version = history["schema_version"]
+            records = history["inspections"]
         except (ValueError, OSError) as error:
             messagebox.showerror("Inspection History", str(error), parent=self.root)
             return
+        self.tree.selection_remove(*self.tree.selection())
         self.records = sorted(records, key=lambda record: datetime.fromisoformat(record["timestamp"]),
                               reverse=True)
         for child in self.tree.get_children():
@@ -369,6 +433,50 @@ class HistoryWindow:
                 f"{progress['completed']}/{progress['total']} ({progress['percentage']:.0f}%)"))
         self._set_details("Select an inspection to view details." if self.records
                           else "No saved inspections.")
+
+    def _export_destination(self, extension):
+        selected = filedialog.asksaveasfilename(parent=self.root, title="Export inspection data",
+                    initialdir=str(self.history_path.parent / "exports"),
+                    initialfile="inspection-report.html" if extension == ".html" else "inspection-history.csv",
+                    defaultextension=extension, confirmoverwrite=False,
+                    filetypes=[("Export", "*" + extension)])
+        if not selected:
+            return None
+        path = Path(selected)
+        reject_output_alias(path, self.runtime_paths.mapping().values())
+        overwrite = path.exists()
+        if overwrite and not messagebox.askyesno("Overwrite export", f"Replace {path}?", parent=self.root):
+            return None
+        return path, overwrite
+
+    def export_selected_report(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("Export Selected Report", "Select a saved inspection first.", parent=self.root)
+            return
+        try:
+            destination = self._export_destination(".html")
+            if destination is None:
+                return
+            path, overwrite = destination
+            export_inspection_html(self.records[int(selection[0])], path,
+                                   schema_version=self.schema_version, overwrite=overwrite)
+        except (ValueError, OSError, IndexError) as error:
+            messagebox.showerror("Export Selected Report", str(error), parent=self.root)
+            return
+        messagebox.showinfo("Export Selected Report", f"Report saved: {path}", parent=self.root)
+
+    def export_history_csv(self):
+        try:
+            destination = self._export_destination(".csv")
+            if destination is None:
+                return
+            path, overwrite = destination
+            export_history_csv(self.history_path, path, overwrite=overwrite)
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Export History CSV", str(error), parent=self.root)
+            return
+        messagebox.showinfo("Export History CSV", f"CSV saved: {path}", parent=self.root)
 
     def show_selected_inspection(self, event=None):
         selection = self.tree.selection()

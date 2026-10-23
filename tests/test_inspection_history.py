@@ -305,5 +305,31 @@ class TestInspectionHistory(unittest.TestCase):
             self.assertEqual(self.path.read_bytes(), before)
 
 
+
+
+class TestPublicSnapshotValidation(unittest.TestCase):
+    def test_checklist_wrapper_copies_and_rejects(self):
+        from checklist import create_default_data
+        from inspection_history import validate_checklist_snapshot
+        source = create_default_data()
+        result = validate_checklist_snapshot(source)
+        result['oil']['name'] = 'changed'
+        self.assertNotEqual(result, source)
+        with self.assertRaises(ValueError):
+            validate_checklist_snapshot({})
+
+    def test_record_wrapper_copies_and_checks_schema(self):
+        from checklist import create_default_data
+        from inspection_history import validate_inspection_record, create_default_findings, create_inspection_record
+        source = create_inspection_record('Unit', '1', '', create_default_data(),
+                                          findings=create_default_findings(), assessment='Ready for service')
+        result = validate_inspection_record(source, schema_version=2)
+        result['notes'] = 'changed'
+        self.assertEqual(source['notes'], '')
+        for version in (1, 4, True):
+            with self.assertRaises(ValueError):
+                validate_inspection_record(source, schema_version=version)
+
+
 if __name__ == "__main__":
     unittest.main()

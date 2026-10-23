@@ -345,3 +345,118 @@ This project is provided as-is for personal vehicle maintenance tracking.
 ---
 
 *Zero external dependencies. Just works.*
+
+### Reports, exports, backup, and restore (v1.4.0)
+
+In **History**, select a saved row and choose **Export Selected Report** for a
+standalone printable HTML document. Open it yourself in a browser and use Print;
+the app never opens a browser. The report has inline print styles, no scripts or
+remote resources, and escapes every dynamic HTML value. It includes actual saved
+vehicle name and mileage, UTC timestamp, progress, checklist statuses, all
+findings/comments, assessment, notes, and the independent saved profile snapshot
+when present. Snapshot mileage is separate from actual inspection mileage.
+Legacy findings and assessment say **Not recorded (legacy inspection)**. Absent
+profile metadata says **Profile association/snapshot not recorded**; it does not
+infer how an older inspection was entered. Blank recorded comments remain blank.
+Current profiles are never consulted to reconstruct a historical report.
+
+**Export History CSV** exports one row per saved inspection, including duplicates,
+in persisted history order. A missing history exports just the header without
+creating history. The format is UTF-8 with BOM, comma-separated, CRLF-terminated,
+and uses CSV quoting for commas, quotes, and multiline text. Columns are:
+
+```text
+history_schema_version,history_record_number,timestamp,vehicle_name,mileage,
+completed,total,percentage,findings_recorded,assessment,notes,profile_recorded,
+profile_id,profile_vehicle_name,profile_year,profile_make,profile_model,profile_mileage
+```
+
+These are followed by `<id>_name`, `<id>_complete`, `<id>_condition`, and
+`<id>_comment` for oil, coolant, tires, brakes, lights, battery, and leaks, in that
+order. Flags use `true`/`false`. Legacy findings use the explicit legacy label;
+missing profile fields are empty with `profile_recorded=false`. The record number
+is the one-based position in this export, not a permanent inspection ID.
+Formula-like text beginning with `=`, `+`, `-`, or `@` after leading whitespace/control characters
+receives a leading apostrophe to reduce spreadsheet formula execution risk.
+This changes exported text only; it never changes stored JSON. Spreadsheet
+programs differ in their handling of that apostrophe. Numeric columns stay numeric. NUL characters are exported as the visible text
+`\u0000` because Python 3.10 CSV cannot represent them; stored text remains unchanged.
+
+Save dialogs suggest the project-local `exports/` directory. Create it in the
+save dialog if desired, or choose another existing directory. Existing outputs
+require an explicit overwrite confirmation; cancelled exports do nothing.
+Exports may not overwrite or alias runtime data. Exports and their tests do not
+modify history or profiles.
+
+**Backup All Data** asks for an existing destination directory (suggesting
+`backups/`) and creates `vehicle-checklist-backup-<UTC timestamp>.zip`, with
+microsecond precision. Name collisions fail rather than overwriting an archive.
+Only existing `checklist_data.json`, `inspection_history.json`, and
+`vehicle_profiles.json` files are included, alongside `manifest.json`. Missing
+files are not created; a backup with no runtime files is rejected. Source code,
+caches, other exports, and unrelated files are never included. Invalid existing
+runtime data causes backup to fail rather than silently omitting it.
+
+The manifest has exactly `manifest_version` (integer 1), `application`
+(`vehicle-maintenance-checklist`), `release` (`1.4.0`), `created_at` (UTC ISO 8601),
+and `files`. Each sorted file entry has exactly `filename`, `size` (byte count),
+and `sha256` (lowercase hexadecimal digest). Runtime contents are archived as
+exact bytes. SHA-256 detects accidental changes; it does not authenticate who
+created a backup. Archives are not encrypted and may contain sensitive notes.
+
+**Restore Backup** validates the entire archive before requesting confirmation.
+The warning lists files to replace/create and omitted files to retain. Make a
+current backup first: included stores are replaced, not merged. **An omitted
+runtime file always leaves the current file untouched; omission never deletes.**
+Cancel performs no writes. Restoring preserves original JSON bytes and history
+schemas 1, 2, and 3 without migrations, normalization, or new inspection records.
+Profiles use their existing schema 1; checklist data uses its existing seven-item
+structure. No matching current profile is required for a saved profile snapshot.
+
+Validation rejects unknown/unsafe names, directories, duplicate ZIP members,
+symlinks/special members, encrypted members, unsupported compression (only stored
+and deflated are accepted), corrupt ZIPs/CRCs, malformed or duplicate-key JSON,
+nonstandard numeric constants, invalid persistence data, malformed manifests,
+unsupported manifest versions, duplicate manifest entries, unlisted or missing
+members, size discrepancies, and SHA-256 mismatches. Limits are 64 MiB per ZIP,
+64 KiB for the manifest, 16 MiB per runtime file, and 48 MiB total runtime bytes,
+with at most four members. Both declared sizes and bounded actual reads are
+checked. Backup creation applies the same runtime limits. Valid larger datasets
+need a future explicit limit change; they are not truncated.
+
+Checklist backup/restore validation requires exactly the seven known IDs, each
+with a string name and boolean completion. This is stricter than the original
+permissive CLI JSON loader; CLI behavior itself is unchanged. Runtime destinations
+must be distinct regular files or absent. Symlink leaves, special files, hard-link
+aliases, resolved-path aliases, and aliases of the selected output/archive are
+rejected. Parent path aliases such as macOS `/var` are resolved for comparisons.
+
+Restore revalidates every payload and destination, fingerprints existing files,
+stages all replacements and rollback copies in the target directories, flushes
+and fsyncs those files, and checks fingerprints again before replacing anything.
+Replacement uses `os.replace()`; affected parent directories are fsynced where
+supported. A replacement failure triggers rollback, including removing newly
+created targets that were originally absent. Successfully rolled-back failures
+preserve original bytes. If rollback cannot finish, the error clearly reports
+all retained `.recovery` files and originally absent targets requiring attention.
+Keep those recovery files until every affected store is recovered; they contain
+the original bytes and must not be committed. Do not treat that error as success.
+
+**Atomic replacement applies to one file at a time.** Power loss, process death,
+disk failure, or failed rollback can leave multiple stores at different points
+in the restore. There is no true multi-file atomic guarantee or automatic crash
+recovery. Do not run another GUI instance or CLI writer during backup/restore:
+fingerprints detect changes during preparation, but cannot eliminate a race
+between the final check and replacement. Backup reads stores sequentially and
+cannot promise a single simultaneous snapshot of concurrent writes.
+
+A successful restore refreshes checklist completion, profile choices, and open
+history views. Vehicle fields, notes, findings, and assessment drafts remain.
+Removed profile associations clear according to existing reload behavior.
+Refreshing an absent checklist after restore shows defaults without creating a
+file. Review retained draft values before saving another inspection.
+
+`/exports/` and `/backups/` are ignored by Git. Outputs saved elsewhere in the
+project are not covered by those directory rules: do not stage them. All filesystem
+tests use injected paths under `TemporaryDirectory`; GUI tests mock widgets,
+windows, and dialogs and never open exported documents.
