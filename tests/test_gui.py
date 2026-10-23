@@ -47,7 +47,7 @@ class TestChecklistGUI(unittest.TestCase):
                 complete.assert_called_once_with(item_id)
         buttons = {call.kwargs["text"]: call.kwargs["command"]
                    for call in self.widgets["Button"].call_args_list}
-        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup", "Maintenance…"})
+        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup", "Maintenance…", "Fleet Dashboard…"})
         self.assertEqual(buttons["Save Inspection"], self.app.save_inspection)
         self.assertEqual(buttons["History"], self.app.open_history)
         self.assertEqual(buttons["Refresh"], self.app.refresh)
@@ -151,6 +151,20 @@ class TestChecklistGUI(unittest.TestCase):
             error.assert_called_once()
             export.assert_not_called()
         self.assertEqual(custom.read_bytes(), b"preserve custom schedule")
+
+    def test_dashboard_entry_custom_paths_and_task_navigation(self):
+        custom = self.data_path.parent / 'custom-schedule.json'
+        app = gui.ChecklistApp(self.root, self.data_path, maintenance_path=custom)
+        with patch.object(gui, 'FleetDashboardWindow') as dashboard:
+            app.open_dashboard()
+            dashboard.assert_called_once_with(self.root, custom, app.profiles_path,
+                runtime_paths=tuple(app.runtime_paths().mapping().values()), open_task=app.open_dashboard_task)
+            self.assertEqual(app.dashboard_windows, [dashboard.return_value])
+        with patch.object(gui, 'MaintenanceWindow') as maintenance:
+            app.open_dashboard_task('task-id')
+            maintenance.return_value.focus_task.assert_called_once_with('task-id')
+        buttons = {c.kwargs['text']: c.kwargs['command'] for c in self.widgets['Button'].call_args_list}
+        self.assertEqual(buttons['Fleet Dashboard…'], app.open_dashboard)
 
     def test_open_history_uses_injected_path(self):
         with patch.object(gui, "HistoryWindow") as window:
@@ -457,6 +471,11 @@ class TestReleaseActions(unittest.TestCase):
         self.app.history_windows.append(window)
         maintenance = MagicMock()
         self.app.maintenance_windows.append(maintenance)
+        dashboard = MagicMock()
+        self.app.dashboard_windows.append(dashboard)
+        closed_dashboard = MagicMock()
+        closed_dashboard.root.winfo_exists.return_value = False
+        self.app.dashboard_windows.append(closed_dashboard)
         draft = (self.app.vehicle_name.get(), self.app.mileage.get(), self.app.notes.get(),
                  self.app.assessment.get(), self.app.findings.copy())
         self.data_path.unlink()
@@ -467,6 +486,8 @@ class TestReleaseActions(unittest.TestCase):
         self.assertFalse(self.data_path.exists())
         window.refresh.assert_called_once()
         maintenance.refresh.assert_called_once()
+        dashboard.refresh.assert_called_once_with(reset=True)
+        closed_dashboard.refresh.assert_not_called()
         self.assertEqual((self.app.vehicle_name.get(), self.app.mileage.get(), self.app.notes.get(), self.app.assessment.get(), self.app.findings), draft)
         self.app.progress.set.assert_called_with('Progress: [░░░░░░░] 0/7 (0%)')
 

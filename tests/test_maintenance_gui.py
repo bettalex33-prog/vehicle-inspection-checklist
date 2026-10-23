@@ -109,6 +109,37 @@ class TestMaintenanceGUI(unittest.TestCase):
         self.askyesno.return_value = True; self.window.remove_task()
         self.assertEqual(ms.load_schedule(self.path)['tasks'], [])
 
+    def test_dashboard_focus_archived_missing_profile_and_complete_history(self):
+        task = self.create()
+        task = ms.record_service(self.path, task['task_id'],
+            dict(completed_date='2026-10-22', mileage=46500, notes='complete history'),
+            profiles_path=self.profiles, expected_task=task, today=date.today())
+        task = ms.archive_task(self.path, task['task_id'], expected_task=task)
+        self.profiles.write_text('{"schema_version":1,"profiles":[]}')
+        before = self.path.read_bytes()
+        self.window.tree.selection.return_value = (task['task_id'],)
+        self.window.mileage.set('99999')
+        self.window.focus_task(task['task_id'])
+        self.assertEqual(self.window.view.get(), 'Archived')
+        self.assertEqual(self.window.profile_selector.current(), 1)
+        self.assertEqual(self.window.mileage.get(), '')
+        self.window.tree.selection_set.assert_called_with(task['task_id'])
+        self.window.tree.see.assert_called_with(task['task_id'])
+        self.assertIn('complete history', self.window.details.insert.call_args.args[1])
+        self.assertEqual(self.path.read_bytes(), before)
+        with self.assertRaises(ValueError):
+            self.window.focus_task('deleted-task')
+        self.path.write_bytes(b'corrupt')
+        with self.assertRaises(ValueError):
+            self.window.focus_task(task['task_id'])
+
+    def test_dashboard_focus_active_live_profile(self):
+        task = self.create()
+        self.window.tree.selection.return_value = (task['task_id'],)
+        self.window.focus_task(task['task_id'])
+        self.assertEqual(self.window.view.get(), 'Active')
+        self.assertEqual(self.window.profile_selector.current(), 2)
+
     def test_editor_validation_failure_cancel_and_success(self):
         editor = self.editor(); editor.save()
         self.showerror.assert_called_once(); self.assertFalse(self.path.exists())

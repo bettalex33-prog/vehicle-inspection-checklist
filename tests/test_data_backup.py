@@ -77,6 +77,39 @@ class TestBackup(unittest.TestCase):
                 for n, path in self.mapping.items():
                     self.assertEqual(path.read_bytes(), self.samples[n] if n in names else b'original-' + n.encode())
 
+    def test_v170_metadata_and_four_release_compatibility(self):
+        self.populate()
+        backup = db.create_backup(self.paths, self.root, timestamp=self.stamp)
+        with zipfile.ZipFile(backup) as archive:
+            manifest = json.loads(archive.read('manifest.json'))
+        self.assertEqual(manifest['release'], '1.7.0')
+        self.assertEqual(manifest['manifest_version'], 1)
+        self.assertEqual({entry['filename'] for entry in manifest['files']}, set(db.NAMES))
+        for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0'):
+            payloads = {n: p for n, p in self.samples.items()
+                        if release != '1.4.0' or n != 'maintenance_schedule.json'}
+            manifest = self.manifest(payloads); manifest['release'] = release
+            validated = db.validate_backup(self.archive(payloads, manifest))
+            for path in self.mapping.values():
+                path.write_bytes(b'original')
+            db.restore_backup(validated, self.paths, confirmed=True)
+            for name, path in self.mapping.items():
+                self.assertEqual(path.read_bytes(), payloads.get(name, b'original'))
+
+    def test_v170_and_v160_accept_schema_two_without_weakening_older_rules(self):
+        from test_fleet_dashboard import task, service
+        payloads = dict(self.samples)
+        payloads['maintenance_schedule.json'] = json.dumps({'schema_version': 2,
+            'tasks': [task(enabled=False, archived=True, services=[service(labor_cost='62.37')])]}, indent=4).encode()
+        for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0'):
+            manifest = self.manifest(payloads); manifest['release'] = release
+            if release in ('1.4.0', '1.5.0'):
+                with self.assertRaises(ValueError):
+                    db.validate_backup(self.archive(payloads, manifest))
+            else:
+                validated = db.validate_backup(self.archive(payloads, manifest))
+                self.assertEqual(dict(validated.files), payloads)
+
     def test_schema_bytes_preserved(self):
         for version in (1, 2, 3):
             r = record()

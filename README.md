@@ -2,6 +2,98 @@
 
 A simple command-line tool for tracking vehicle maintenance inspections using only Python standard library modules. No installation or external dependencies required.
 
+## Fleet Dashboard and Maintenance Alerts (v1.7.0)
+
+Open **Fleet Dashboard…** from the checklist. The dashboard is read-only: it does
+not record services, update profiles, alter inspections, or change checklist
+completion. Alerts are local visual indicators; no background processes,
+notifications, or persistent dashboard settings are added.
+
+Fleet totals include every task exactly once as **Overdue**, **Due**, **Due soon**,
+**Upcoming**, **Mileage needed**, **Disabled**, or **Archived**. Archived takes
+precedence over Disabled. For enabled tasks, an overdue interval takes precedence
+over a due interval, which takes precedence over a warning interval. An unknown
+mileage interval is marked Mileage needed unless its date interval already
+produces Overdue, Due, or Due soon. Separate mileage-needed indicators remain
+visible even when the date status takes precedence. Existing task intervals and
+warning thresholds are unchanged.
+
+The default evaluates dates for the whole fleet. To evaluate mileage, select one
+existing profile, explicitly enter **Current mileage**, and click **Evaluate /
+Refresh**. The value is never prefilled or inferred from a profile, inspection,
+service record, or captured snapshot. It is never saved or written back to the
+profile. Selecting a different profile clears it. Mileage below an enabled task's
+latest service/baseline mileage is rejected. Disabled and archived tasks do not
+consume evaluation mileage. Missing-profile tasks remain visible using captured
+identity, but cannot receive current mileage. Restarting or restoring a backup
+clears transient mileage evaluation.
+
+Totals and per-vehicle summaries always cover the fleet. The selected profile
+filters the task and appointment tables and receives explicit mileage evaluation;
+the status selector filters only the task table. Vehicle groups use stable profile
+IDs, never display names. Existing vehicles with no tasks are included, and
+missing profiles retain their own groups. Captured snapshot variants remain
+available in complete task details.
+
+Appointment groups are mutually exclusive, relative to the evaluation date:
+
+| Group | Calendar-day offset |
+| --- | --- |
+| Passed | Before today |
+| 0–7 days | Today through day 7, inclusive |
+| 8–30 days | Days 8 through 30, inclusive |
+| 31–90 days | Days 31 through 90, inclusive |
+
+Only enabled, nonarchived tasks enter appointment groups. Appointments beyond
+90 days, disabled appointments, and archived appointments remain visible in task
+details. An appointment never changes the task's due status.
+
+Cost summaries cover the fleet, each vehicle, and each task, including disabled,
+archived, and missing-profile tasks. Optional **Cost start** and **Cost end** use
+YYYY-MM-DD and inclusive service completion dates; blank bounds are unbounded.
+The start cannot follow the end. Costs use integer cents. Explicit zero is priced;
+unpriced services and legacy services are counted separately. With no matching
+priced services the total is **Not recorded**, rather than an invented $0.00.
+Date ranges affect costs only, never status totals, appointments, or full history.
+
+Select a task or appointment and click **Open Task / Full History**, or double-click
+it, to navigate to the existing maintenance view. Navigation reloads by stable
+task ID, opens the correct Active/Archived and profile view, and shows all captured
+details and services. It does not transfer evaluation mileage. If source data has
+changed, refresh the dashboard before navigating or exporting. Invalid data or
+evaluation inputs make the dashboard unavailable; editing inputs marks displayed
+results as needing refresh and disables export/navigation.
+
+**Export CSV** and **Export HTML** save separate dashboard reports. Choose an
+existing output directory; the default is `exports/`. Existing destinations require
+explicit overwrite confirmation. CSV uses a fixed header, UTF-8 BOM, CRLF, proper
+quoting, and spreadsheet-formula protection. Its `row_type` values are
+`status_total`, `vehicle_summary`, `task`, `appointment`, `cost_overall`,
+`cost_vehicle`, and `cost_task`. Rows include evaluation context, stable IDs,
+status counts, due values, appointment buckets, and exact cents plus displayed
+costs. Nonapplicable values are blank; unrecorded totals have blank cents and
+Not recorded display text. Dashboard exports always cover the whole fleet and
+record the selected profile used for mileage; visual table filters do not omit data.
+
+HTML includes equivalent summary information and internal links to full task
+details, captured profile snapshots, and **unfiltered** priced/unpriced/legacy
+service history. Text is escaped; reports require no scripts or external assets.
+Existing maintenance-history and inspection exports retain their original behavior.
+
+Exports are published atomically from same-directory temporary files, which are
+cleaned up on failure. Runtime/source aliases, symlinks, hard links, and custom
+runtime paths are protected. Sources are revalidated immediately before publication;
+an output changed during confirmation or preparation is not overwritten. Dashboard
+source reads are bounded to 16 MiB; existing outputs are fingerprinted in chunks.
+These checks detect stale data
+but are not a cross-process locking transaction; use one writer at a time.
+
+New backups use release **1.7.0**, manifest version 1, and the same four runtime
+members. Restore continues to accept v1.4.0, v1.5.0, and v1.6.0 backups; maintenance
+schemas 1 and 2 remain supported with their original release restrictions. Missing
+backup members leave corresponding runtime files untouched. No dashboard inputs
+or reports enter backups. Older app versions may reject a 1.7.0 manifest.
+
 ## Requirements
 
 No external Python dependencies. The GUI requires a Python installation with tkinter support.
@@ -690,7 +782,7 @@ services are counted separately from recorded zero-cost services. A partially
 priced service contributes its recorded total while its missing components stay
 marked Not recorded.
 
-New backups use release `1.6.0` and the existing manifest version 1. They retain
+The v1.6.0 release introduced backup release `1.6.0` with manifest version 1. These backups retain
 strict validation, byte-for-byte restoration, alias checks, staging, rollback,
 and recovery behavior. v1.4.0 and v1.5.0 archives still restore without fabricated
 fields or maintenance migrations; omitted stores remain untouched. Both schema

@@ -63,6 +63,24 @@ class MaintenanceWindow:
         index = self.profile_selector.current() - 2
         return self.profiles[index] if 0 <= index < len(self.profiles) else None
 
+    def focus_task(self, task_id):
+        """Reload and navigate by stable ID; always show complete, unfiltered history."""
+        self.mileage.set('')
+        self.refresh()
+        if not self.available:
+            raise ValueError('Maintenance unavailable; refresh after correcting the data.')
+        task = next((task for task in self.tasks if task['task_id'] == task_id), None)
+        if task is None:
+            raise ValueError('Task no longer exists. Refresh the dashboard.')
+        ids = [profile['profile_id'] for profile in self.profiles]
+        self.view.set('Archived' if task['archived'] else 'Active')
+        self.profile_selector.current(ids.index(task['profile_id']) + 2 if task['profile_id'] in ids else 1)
+        self.render()
+        self.tree.selection_set(task_id)
+        self.tree.focus(task_id)
+        self.tree.see(task_id)
+        self.show_details()
+
     def selected_task(self):
         selection = self.tree.selection()
         return next((task for task in self.tasks if selection and task['task_id'] == selection[0]), None)

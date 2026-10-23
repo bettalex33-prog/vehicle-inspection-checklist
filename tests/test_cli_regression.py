@@ -8,6 +8,27 @@ import unittest
 
 
 class TestCLIRegression(unittest.TestCase):
+    def test_dashboard_import_and_evaluation_leave_five_of_seven_unchanged(self):
+        import json
+        from checklist import create_default_data
+        from fleet_dashboard_exports import capture_dashboard
+        from test_fleet_dashboard import TODAY, profile, task
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copyfile(Path(__file__).resolve().parents[1] / 'checklist.py', root / 'checklist.py')
+            data = create_default_data()
+            for item in list(data.values())[:5]:
+                item['complete'] = True
+            (root / 'checklist_data.json').write_text(json.dumps(data))
+            (root / 'vehicle_profiles.json').write_text(json.dumps({'schema_version': 1, 'profiles': [profile()]}))
+            (root / 'maintenance_schedule.json').write_text(json.dumps({'schema_version': 1, 'tasks': [task()]}))
+            before = {p.name: p.read_bytes() for p in root.iterdir()}
+            capture_dashboard(root / 'maintenance_schedule.json', root / 'vehicle_profiles.json', today=TODAY).model
+            progress = subprocess.run([sys.executable, str(root / 'checklist.py'), 'progress'],
+                                      capture_output=True, text=True, cwd=root, check=True)
+            self.assertEqual(progress.stdout, 'Progress: [█████░░] 5/7 (71%)\n')
+            self.assertEqual({p.name: p.read_bytes() for p in root.iterdir()}, before)
+
     def test_commands_progress_and_isolation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
