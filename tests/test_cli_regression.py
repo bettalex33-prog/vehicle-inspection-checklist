@@ -8,6 +8,27 @@ import unittest
 
 
 class TestCLIRegression(unittest.TestCase):
+    def test_insights_capture_preserves_five_of_seven_and_all_stores(self):
+        import json
+        from checklist import create_default_data
+        from maintenance_insights_sources import capture_insights
+        from test_maintenance_insights import AS_OF, positive_task, schedule, history
+        from test_fleet_dashboard import profile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copyfile(Path(__file__).resolve().parents[1] / 'checklist.py', root / 'checklist.py')
+            data = create_default_data()
+            for item in list(data.values())[:5]: item['complete'] = True
+            stores = {'checklist_data.json': data, 'maintenance_schedule.json': schedule([positive_task()]),
+                      'vehicle_profiles.json': {'schema_version': 1, 'profiles': [profile()]}, 'inspection_history.json': history()}
+            for name, value in stores.items(): (root/name).write_text(json.dumps(value))
+            before = {p.name: p.read_bytes() for p in root.iterdir()}
+            snapshot = capture_insights(root/'maintenance_schedule.json', root/'vehicle_profiles.json', root/'inspection_history.json', as_of=AS_OF)
+            self.assertTrue(snapshot.model['export_available'])
+            result = subprocess.run([sys.executable, '-B', str(root/'checklist.py'), 'progress'], cwd=root, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, 'Progress: [█████░░] 5/7 (71%)\n')
+            self.assertEqual({p.name: p.read_bytes() for p in root.iterdir()}, before)
+
     def test_dashboard_import_and_evaluation_leave_five_of_seven_unchanged(self):
         import json
         from checklist import create_default_data

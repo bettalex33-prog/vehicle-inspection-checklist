@@ -16,6 +16,7 @@ from data_backup import (RuntimePaths, create_backup, validate_backup, restore_b
 from inspection_exports import export_inspection_html, export_history_csv
 from maintenance_gui import MaintenanceWindow
 from fleet_dashboard_gui import FleetDashboardWindow
+from maintenance_insights_gui import MaintenanceInsightsWindow
 
 from vehicle_profiles import load_profiles, create_profile, update_profile, delete_profile
 
@@ -45,6 +46,7 @@ class ChecklistApp:
                                  Path(data_path).with_name("maintenance_schedule.json"))
         self.maintenance_windows = []
         self.dashboard_windows = []
+        self.insights_windows = []
         self.history_windows = []
         self.profiles = []
         self.active_profile = None
@@ -107,6 +109,7 @@ class ChecklistApp:
             ("History", self.open_history),
             ("Maintenance…", self.open_maintenance),
             ("Fleet Dashboard…", self.open_dashboard),
+            ("Maintenance Insights…", self.open_insights),
             ("Refresh", self.refresh),
             ("Reset All", self.reset_all),
             ("Backup All Data", self.backup_all_data),
@@ -226,6 +229,11 @@ class ChecklistApp:
         self.maintenance_windows.append(window)
         window.focus_task(task_id)
 
+    def open_insights(self):
+        self.insights_windows.append(MaintenanceInsightsWindow(
+            self.root, self.maintenance_path, self.profiles_path, self.history_path,
+            runtime_paths=tuple(self.runtime_paths().mapping().values()), open_task=self.open_dashboard_task))
+
     def runtime_paths(self):
         return RuntimePaths(Path(self.data_path), self.history_path, self.profiles_path, self.maintenance_path)
 
@@ -265,6 +273,9 @@ class ChecklistApp:
             self.refresh(create_missing=False)
             self.reload_profiles()
             for window in self.dashboard_windows:
+                if window.root.winfo_exists():
+                    window.refresh(reset=True)
+            for window in self.insights_windows:
                 if window.root.winfo_exists():
                     window.refresh(reset=True)
             for window in self.maintenance_windows:

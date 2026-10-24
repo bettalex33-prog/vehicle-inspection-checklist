@@ -12,6 +12,16 @@ from datetime import datetime, timezone
 
 
 class TestChecklistGUI(unittest.TestCase):
+    def test_standard_widgets_keep_native_configuration(self):
+        forbidden = {'foreground', 'background', 'fg', 'bg', 'font', 'style'}
+        for name in ('Label', 'Entry', 'Text', 'Checkbutton'):
+            self.assertTrue(self.widgets[name].called)
+            for call in self.widgets[name].call_args_list:
+                self.assertFalse(forbidden.intersection(call.kwargs))
+                self.assertNotEqual(call.kwargs.get('state'), 'hidden')
+        self.assertTrue(any(c.kwargs.get('textvariable') is self.app.progress
+                            for c in self.widgets['Label'].call_args_list))
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -47,7 +57,7 @@ class TestChecklistGUI(unittest.TestCase):
                 complete.assert_called_once_with(item_id)
         buttons = {call.kwargs["text"]: call.kwargs["command"]
                    for call in self.widgets["Button"].call_args_list}
-        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup", "Maintenance…", "Fleet Dashboard…"})
+        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup", "Maintenance…", "Fleet Dashboard…", "Maintenance Insights…"})
         self.assertEqual(buttons["Save Inspection"], self.app.save_inspection)
         self.assertEqual(buttons["History"], self.app.open_history)
         self.assertEqual(buttons["Refresh"], self.app.refresh)
@@ -439,10 +449,41 @@ class TestChecklistGUI(unittest.TestCase):
 
 
 
+    def test_insights_entry_uses_injected_paths(self):
+        with patch.object(gui, 'MaintenanceInsightsWindow') as factory:
+            self.app.open_insights()
+            factory.assert_called_once_with(self.root, self.app.maintenance_path,
+                self.app.profiles_path, self.app.history_path,
+                runtime_paths=tuple(self.app.runtime_paths().mapping().values()), open_task=self.app.open_dashboard_task)
+        self.assertEqual(self.app.insights_windows, [factory.return_value])
+
+    def test_insights_navigation_reuses_full_history_without_inputs(self):
+        with patch.object(gui, 'MaintenanceInsightsWindow') as insights, patch.object(gui, 'MaintenanceWindow') as maintenance:
+            self.app.open_insights()
+            callback = insights.call_args.kwargs['open_task']
+            callback('stable-task-id')
+            maintenance.assert_called_once_with(self.root, self.app.maintenance_path, self.app.profiles_path)
+            maintenance.return_value.focus_task.assert_called_once_with('stable-task-id')
+
+
 class TestReleaseActions(unittest.TestCase):
     """Use the same mocked widgets and injected temporary stores as legacy tests."""
 
     setUp = TestChecklistGUI.setUp
+
+    def test_restore_resets_only_open_insights_windows(self):
+        from data_backup import create_backup
+        backup = create_backup(self.app.runtime_paths(), self.data_path.parent)
+        opened, closed = MagicMock(), MagicMock()
+        opened.root.winfo_exists.return_value = True
+        closed.root.winfo_exists.return_value = False
+        self.app.insights_windows = [opened, closed]
+        with patch.object(gui.filedialog, 'askopenfilename', return_value=str(backup)), \
+             patch.object(gui.messagebox, 'askyesno', return_value=True), \
+             patch.object(gui.messagebox, 'showinfo'):
+            self.app.restore_backup()
+        opened.refresh.assert_called_once_with(reset=True)
+        closed.refresh.assert_not_called()
 
     def test_backup_cancel_and_success(self):
         with patch.object(gui.filedialog, 'askdirectory', return_value=''), patch.object(gui, 'create_backup') as create:

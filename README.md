@@ -789,3 +789,148 @@ fields or maintenance migrations; omitted stores remain untouched. Both schema
 1 and schema 2 maintenance data round-trip exactly through current backups.
 Older release manifests cannot claim schema 2 maintenance data. Existing
 checklist CLI commands and their exact outputs remain unchanged.
+
+### Maintenance Insights and Forecasting (v1.8.0)
+
+Open **Maintenance Insights…** from the main checklist. One local window provides
+**Forecasts**, **Costs and Months**, **Observations**, and **Data Quality** pages.
+Choose a vehicle by its stable profile ID, optionally enter explicit current
+mileage, and press **Evaluate / Refresh**. The initial evaluation date is today's
+local calendar date; it can be changed for the session. Cost dates and explicit
+mileage initially are blank. All-profile summaries remain fleet-wide; the profile
+selection filters detail tables and scopes explicit mileage to one live profile.
+Missing-profile historical IDs remain selectable for viewing, never for entering
+current mileage. Equal vehicle names never join records.
+
+Input edits require evaluation before navigation or export. Changing profiles or
+the evaluation date clears explicit mileage. Detected source changes clear the
+successful presentation and mileage; refresh reads the new data. Focus return,
+evaluation, navigation and export revalidate sources without polling or a timer.
+Restore resets open Insights windows' session filters. Closing/reopening resets
+all inputs. **Open Task / Full History** passes only a stable task ID to the
+existing Maintenance view; cost filters and mileage are never transferred.
+
+**Facts, thresholds, rates and estimates are distinct.** Service and inspection
+mileage/date entries are observed records. Next due date is the final service
+date plus interval days; next due mileage is final service mileage plus interval
+miles. Only a task with no services uses its baseline. Date and mileage axes stay
+independent. Unconfigured axes say **Not applicable**. Disabled and archived
+tasks retain thresholds and complete history but say **Excluded** operationally.
+The existing seven mutually exclusive maintenance statuses and precedence remain
+unchanged; estimated dates never determine those statuses. No current mileage
+is inferred, prefilled or saved, and no calculated value is written to any store.
+
+**Observed endpoint rate** uses two or more distinct trustworthy calendar dates
+for one stable profile ID. Eligible observations are maintenance service mileage
+on its completion date (including legacy, disabled and archived task history),
+and schema-3 profile-linked inspection record mileage on its stored **UTC**
+calendar date. Inspection snapshot mileage is not the record mileage. Unlinked
+inspections, task baselines, appointments, undated live-profile or captured
+snapshot mileage, and explicit session inputs are not rate observations.
+
+Identical date/mileage observations collapse while retaining every source
+reference and SHA-256 digest. Different mileages on the same date, or any
+chronological mileage decrease across the profile's observations, make its rate
+unavailable; no convenient subset is substituted. Future observations are warned
+about and excluded. The latest accepted observation must be at most **90 days**
+old, inclusive; **91 days** is stale for forecasting. Older points still remain
+evidence. Undated profile mileage disagreement is informational and does not
+create a dated conflict. Missing live profiles do not erase explicit historical
+ID associations. A recreated vehicle with the same name has a different identity.
+
+The endpoint rate is exactly `(newest mileage - oldest mileage) / (newest date -
+oldest date)`, stored as integer miles and days. Every intermediate point is
+checked for conflicts/decreases. The optional two-decimal miles/day display uses
+integer half-up rounding and is never used in calculations. For a positive rate,
+estimated days to threshold are the integer ceiling of
+`(threshold - reference mileage) * rate days / rate miles`. With valid explicit
+mileage, the reference is that mileage at the evaluation date. Otherwise the
+label is **Estimate from last recorded observation**, using that dated record;
+an estimated current odometer value is never calculated or displayed. Already
+reached thresholds have no invented crossing date. Zero endpoint rate, missing
+observations, conflicts, stale observations, future anchors and calendar overflow
+have explicit unavailable reasons. Estimates assume historical usage continues;
+they are not guaranteed service dates or appointment recommendations.
+
+Explicit mileage below accepted history or an applicable task anchor is invalid.
+Date and recorded-cost sections remain available, but mileage-dependent results,
+navigation and exports are blocked until corrected. Nonnumeric or negative inputs
+are not converted into a guessed value. No value is inferred from the stored
+profile mileage, which may legitimately be older than service history.
+
+**Cost filters** use inclusive service completion dates in canonical YYYY-MM-DD.
+They affect overall/per-vehicle costs and monthly summaries only. All task states,
+including missing-profile tasks, participate. Service counts equal priced plus
+unpriced; legacy count is a subset of unpriced count. Explicit zero is priced.
+Unpriced services do not enter monetary calculations. Partially priced services
+contribute their validated recorded total, with omitted components still unrecorded.
+With no priced matches, total, average, minimum and maximum say **Not recorded**,
+never a fabricated zero. All arithmetic uses integer cents. Average cents use
+`(2 * total_cents + priced_count) // (2 * priced_count)` (half-up), and total/count
+remain available to recover the exact rational average. Vehicle aggregation uses
+stable IDs; immutable captured snapshots are exported separately from live names.
+
+Monthly costs are sorted by YYYY-MM, omit months with no matching services, and
+retain unpriced-only months with counts and Not recorded money. Recently serviced
+means `[evaluation date - 30 days, evaluation date]`, inclusive. Approaching lists
+show date thresholds and mileage-estimate dates in `[evaluation date, evaluation
+date + 30 days]`, independently. Already-due/overdue tasks are also listed separately.
+Recent and approaching lists, existing status totals, and complete history ignore
+cost filters. Future service dates are excluded from observed trends/rates but may
+match literal cost queries; warnings explicitly disclose this distinction.
+
+**Data Quality** lists deterministic warnings with stable identities and source
+references. Missing stores are validated empty data with a warning and are never
+created. Invalid UTF-8/JSON, duplicate keys, nonfinite constants, unsupported schemas,
+invalid IDs/snapshots/costs/associations, duplicate service IDs, unsafe source files
+and corrupt records make the complete capture unavailable, not partially successful
+zero totals. Sources are bounded to 16 MiB each and 128 JSON nesting levels for
+Insights. Nothing is repaired, normalized, migrated or discarded silently. A changed
+source capture requires refresh, which is distinct from the 90-day age policy.
+
+**CSV and HTML** exports include assumptions, source digests, warnings, stable IDs,
+observation provenance, exact rates, both forecast axes, cost/month summaries,
+recent/approaching entries, immutable task snapshots and complete unfiltered
+maintenance service history. Each service appears once in `service_history`;
+other row types may reference it and must not be summed as extra services. CSV
+report version 1 uses the fixed `COLUMNS` schema in `maintenance_insights_exports.py`
+and ordered `row_type` sections: report_context, assumption, source, warning,
+status_total, vehicle_summary, profile_snapshot, observation, usage_rate,
+task_forecast, cost_overall, cost_vehicle, cost_month, recent_service,
+approaching_service, service_history. Blank CSV fields mean absent/not applicable;
+availability and unavailable_reason explain unavailable estimates. Cost columns
+contain integer cents, including zero. HTML formats dollars and Not recorded.
+
+CSV uses UTF-8 BOM, CRLF, standard quoting and text formula-prefix protection,
+including hidden whitespace/control prefixes; numeric columns remain numeric.
+Spreadsheet handling of the protective apostrophe varies. HTML escapes every
+dynamic value and uses no scripts or external resources. Fixed source bytes and
+evaluation arguments produce deterministic reports, with no current export
+timestamp, random value or absolute source path embedded. Files are not opened.
+
+Publication stages a same-directory temporary file, flushes/fsyncs it and
+revalidates sources, resolved aliases, parent identity and destination fingerprint
+immediately before linking a new file or atomically replacing a confirmed output.
+Replacing an existing output requires explicit confirmation of its fingerprint.
+Default runtime filenames, injected runtime paths and actual source paths are
+protected; leaf symlinks, hard-linked files, special files and resolved aliases
+are rejected. Parent aliases such as macOS /var are resolved consistently. Failed
+prepublication checks preserve existing destinations and remove temporary files.
+These checks cannot eliminate every race with a hostile concurrent writer without
+transactional filesystem support; use one writer at a time.
+
+**Compatibility:** new backups identify release 1.8.0 with manifest version **1**.
+The same four runtime members and existing maintenance schemas 1/2 are supported;
+there is no Insights store. v1.4.0 through v1.7.0 backups remain readable with their
+existing release/schema restrictions, omitted-member retention, byte preservation,
+size limits and rollback/recovery behavior. Current dashboard, inspection and
+maintenance-history export formats are unchanged, as are CLI behavior and checklist
+state. Insights tests use disposable TemporaryDirectory stores and fully mocked Tk.
+
+Non-goals: cost prediction, inferred current mileage, conflict reconciliation,
+odometer-reset detection, automatic maintenance edits, schema migrations, AI,
+network access, notifications, scheduling daemons, background services, telemetry,
+or persistent Insights preferences. A stable ID alone cannot prove physical vehicle
+continuity or identify an odometer replacement. UTC inspection dates may differ from
+local service dates; daily conflicts deliberately favor unavailable estimates over
+false precision.

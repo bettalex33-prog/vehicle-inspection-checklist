@@ -77,12 +77,12 @@ class TestBackup(unittest.TestCase):
                 for n, path in self.mapping.items():
                     self.assertEqual(path.read_bytes(), self.samples[n] if n in names else b'original-' + n.encode())
 
-    def test_v170_metadata_and_four_release_compatibility(self):
+    def test_release_metadata_and_four_older_release_compatibility(self):
         self.populate()
         backup = db.create_backup(self.paths, self.root, timestamp=self.stamp)
         with zipfile.ZipFile(backup) as archive:
             manifest = json.loads(archive.read('manifest.json'))
-        self.assertEqual(manifest['release'], '1.7.0')
+        self.assertEqual(manifest['release'], '1.8.0')
         self.assertEqual(manifest['manifest_version'], 1)
         self.assertEqual({entry['filename'] for entry in manifest['files']}, set(db.NAMES))
         for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0'):
@@ -109,6 +109,40 @@ class TestBackup(unittest.TestCase):
             else:
                 validated = db.validate_backup(self.archive(payloads, manifest))
                 self.assertEqual(dict(validated.files), payloads)
+
+    def test_v180_schema_two_and_legacy_exact_bytes_roundtrip(self):
+        from test_maintenance_insights import positive_task, schedule
+        from test_fleet_dashboard import service
+        task = positive_task()
+        legacy = {k: v for k, v in task['services'][0].items() if k in
+                  ('service_id', 'completed_date', 'mileage', 'notes')}
+        task['services'] = [legacy, service(101, '2026-10-11', 10300, labor_cost='0.00')]
+        payloads = dict(self.samples)
+        payloads[db.NAMES[3]] = json.dumps(schedule([task]), indent=3).encode()
+        for name, raw in payloads.items(): self.mapping[name].write_bytes(raw)
+        archive = db.create_backup(self.paths, self.root, timestamp=self.stamp)
+        with zipfile.ZipFile(archive) as stream:
+            manifest = json.loads(stream.read('manifest.json'))
+        self.assertEqual((manifest['release'], manifest['manifest_version']), ('1.8.0', 1))
+        validated = db.validate_backup(archive)
+        self.assertEqual(dict(validated.files), payloads)
+        for path in self.mapping.values(): path.unlink()
+        db.restore_backup(validated, self.paths, confirmed=True)
+        self.assertEqual({name: path.read_bytes() for name, path in self.mapping.items()}, payloads)
+
+    def test_v180_does_not_expand_members_or_older_schema_permissions(self):
+        self.assertEqual(db.NAMES, ('checklist_data.json', 'inspection_history.json', 'vehicle_profiles.json', 'maintenance_schedule.json'))
+        from test_maintenance_insights import positive_task, schedule
+        payloads = {db.NAMES[3]: json.dumps(schedule([positive_task()])).encode()}
+        for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0'):
+            manifest = self.manifest(payloads); manifest['release'] = release
+            if release in ('1.4.0', '1.5.0'):
+                with self.assertRaises(ValueError): db.validate_backup(self.archive(payloads, manifest))
+            else:
+                self.assertEqual(dict(db.validate_backup(self.archive(payloads, manifest)).files), payloads)
+        payloads['maintenance_insights.json'] = b'{}'
+        manifest = self.manifest(payloads); manifest['release'] = '1.8.0'
+        with self.assertRaises(ValueError): db.validate_backup(self.archive(payloads, manifest))
 
     def test_schema_bytes_preserved(self):
         for version in (1, 2, 3):
