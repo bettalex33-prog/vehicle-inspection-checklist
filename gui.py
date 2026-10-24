@@ -29,7 +29,9 @@ from checklist import (
 )
 
 
-DATA_PATH = Path(__file__).resolve().parent / "checklist_data.json"
+from application_paths import source_paths
+
+DATA_PATH = source_paths(__file__).checklist
 
 
 class ChecklistApp:
@@ -545,9 +547,13 @@ class HistoryWindow:
         self._set_details("\n".join(lines))
 
 
-def main():
+def main(runtime_paths=None):
     root = tk.Tk()
-    ChecklistApp(root)
+    if runtime_paths is None:
+        ChecklistApp(root)
+    else:
+        ChecklistApp(root, runtime_paths.checklist, runtime_paths.history,
+                     runtime_paths.profiles, runtime_paths.maintenance)
     root.mainloop()
 
 

@@ -77,15 +77,15 @@ class TestBackup(unittest.TestCase):
                 for n, path in self.mapping.items():
                     self.assertEqual(path.read_bytes(), self.samples[n] if n in names else b'original-' + n.encode())
 
-    def test_release_metadata_and_four_older_release_compatibility(self):
+    def test_release_metadata_and_five_older_release_compatibility(self):
         self.populate()
         backup = db.create_backup(self.paths, self.root, timestamp=self.stamp)
         with zipfile.ZipFile(backup) as archive:
             manifest = json.loads(archive.read('manifest.json'))
-        self.assertEqual(manifest['release'], '1.8.0')
+        self.assertEqual(manifest['release'], '1.9.0')
         self.assertEqual(manifest['manifest_version'], 1)
         self.assertEqual({entry['filename'] for entry in manifest['files']}, set(db.NAMES))
-        for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0'):
+        for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0'):
             payloads = {n: p for n, p in self.samples.items()
                         if release != '1.4.0' or n != 'maintenance_schedule.json'}
             manifest = self.manifest(payloads); manifest['release'] = release
@@ -101,7 +101,7 @@ class TestBackup(unittest.TestCase):
         payloads = dict(self.samples)
         payloads['maintenance_schedule.json'] = json.dumps({'schema_version': 2,
             'tasks': [task(enabled=False, archived=True, services=[service(labor_cost='62.37')])]}, indent=4).encode()
-        for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0'):
+        for release in ('1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0'):
             manifest = self.manifest(payloads); manifest['release'] = release
             if release in ('1.4.0', '1.5.0'):
                 with self.assertRaises(ValueError):
@@ -123,7 +123,7 @@ class TestBackup(unittest.TestCase):
         archive = db.create_backup(self.paths, self.root, timestamp=self.stamp)
         with zipfile.ZipFile(archive) as stream:
             manifest = json.loads(stream.read('manifest.json'))
-        self.assertEqual((manifest['release'], manifest['manifest_version']), ('1.8.0', 1))
+        self.assertEqual((manifest['release'], manifest['manifest_version']), ('1.9.0', 1))
         validated = db.validate_backup(archive)
         self.assertEqual(dict(validated.files), payloads)
         for path in self.mapping.values(): path.unlink()

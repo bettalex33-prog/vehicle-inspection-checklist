@@ -1,0 +1,13 @@
+#!/bin/bash
+set -u
+runtime="/Library/Frameworks/Python.framework/Versions/3.15/bin/python3"
+fail() {
+    /usr/bin/osascript -e 'on run argv' -e 'display alert "Vehicle Inspection Checklist" message (item 1 of argv) as critical' -e 'end run' "$1"
+    exit 1
+}
+code_dir="$(CDPATH= cd -- "$(dirname -- "$0")/../Resources/app" && pwd)" || fail "Application code is missing. Rebuild the application."
+[ -x "$runtime" ] || fail "Required Python/Tk runtime is unavailable: $runtime"
+# -I ignores Python environment overrides and user-site packages; -B prevents bundle writes.
+/usr/bin/arch -arm64 "$runtime" -I -B "$code_dir/app_entry.py"
+result=$?
+[ "$result" -eq 0 ] || fail "Application startup failed. Verify the required Python/Tk runtime, data permissions, and that another instance is not running."

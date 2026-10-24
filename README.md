@@ -934,3 +934,83 @@ or persistent Insights preferences. A stable ID alone cannot prove physical vehi
 continuity or identify an odometer replacement. UTC inspection dates may differ from
 local service dates; daily conflicts deliberately favor unavailable estimates over
 false precision.
+
+
+## v1.9.0 local macOS application
+
+This release adds a local Apple Silicon `.app` launcher. It requires the existing
+verified runtime at `/Library/Frameworks/Python.framework/Versions/3.15/bin/python3`
+with its working Tcl/Tk. There is no PATH/system-Python fallback, runtime download,
+signing, notarization, Intel support, or public-distribution claim. macOS 15.5 is
+the initial acceptance target. Python dependencies remain standard library only.
+
+Build using that runtime with `-I -B build_macos_app.py` (after implementation
+validation and before manual acceptance). The default output is
+`dist/Vehicle Inspection Checklist.app`; an explicit disposable output path is
+also supported. Existing output is never overwritten. The builder copies only
+an explicit production-file allowlist, metadata, and launcher. Generated bundles
+are ignored and must never be committed. No live data is included.
+
+The supported source launcher `./launch_checklist.command` is unchanged. Source
+GUI and CLI continue using repository-adjacent stores. The packaged application
+forces native ARM64 execution with `/usr/bin/arch -arm64` and the exact framework
+runtime. It resolves code inside its own bundle, ignores Python environment overrides and
+user-site packages, and disables bytecode. Its separate writable location is:
+
+`~/Library/Application Support/Vehicle Inspection Checklist/`
+
+The four runtime files retain their existing names and schemas. Exports and
+backups initially suggest `exports/` and `backups/` under that directory; their
+save dialogs still allow another destination. A process-lifetime advisory lock
+`.instance.lock` prevents concurrent packaged writers and is excluded from backups.
+The empty lock file remains after exit; OS lock ownership ends when the process
+exits. Do not delete the lock while the app is running.
+
+On an empty packaged store, choose Restore, Start New, or Cancel. Restore requires
+explicit selection of a validated ZIP and confirmation before any default
+checklist is created. Cancellation or invalid archives do not initialize stores.
+Existing packaged data opens normally; use Backup All Data before the existing
+Restore Backup action to replace it, with explicit confirmation. There is no
+automatic discovery, copying, migration, or synchronization with the source
+installation. Partial backups preserve omitted files under existing restore rules.
+Backup manifest version remains 1 with exactly the same four permitted runtime
+members; release metadata is 1.9.0 and supported older backups remain restorable.
+
+Before release, run all tests with `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest
+discover -s tests -v`, compile modules in memory, check both shell launchers with
+`bash -n`, and run `git diff --check`. Tests and disposable bundle inspection use
+temporary homes and fixtures, never live repository or Application Support data.
+
+Manual acceptance (not performed by automated validation):
+
+1. Make an explicit acceptance backup; keep the original source installation.
+2. Double-click a disposable app from Finder with Terminal closed. Check Dock,
+   focus, close/reopen, repeated launch, spaces/Unicode paths, and moving the app.
+3. Exercise Cancel, Start New, and restore of a fixture backup before adopting
+   real data. Confirm the Application Support location and source/store separation.
+4. Repeat v1.8.0 GUI acceptance: 5/7 progress, all windows/tabs, complete history,
+   costs, profile mileage 43000, and session-only evaluation mileage. Restart to
+   verify filter/mileage reset. Check exports and backup/restore destinations.
+5. Verify missing-runtime and startup errors visibly; verify no bundle writes
+   during read-only-bundle operation. Do not remove the installed runtime to test
+   failure; use a disposable launcher fixture.
+6. Recheck protected-data hashes, exact changed files, final unique test count,
+   clean whitespace, backup compatibility, and ignored build artifacts before
+   separately authorizing staging and release actions.
+
+Rollback: quit the packaged app, retain its Application Support data and backups,
+and use the v1.8.0 source installation with its untouched source data. v1.8.0 does
+not accept 1.9.0-labelled backups; preserve a pre-upgrade backup for rollback.
+There is no schema conversion or automatic reverse migration. Finder lifecycle
+and Tk activation remain manual acceptance gates; this bundle is a local launcher,
+not a self-contained or publicly distributed application.
+
+Accepted v1.9.0 application identity: this app is a local double-clickable wrapper
+that depends on the installed, verified Python 3.15/Tk 9 framework runtime. macOS
+displays **Python** in the application menu because that external runtime owns
+the process. This cosmetic limitation does not affect the **Vehicle Inspection
+Checklist** window title, source/packaged data separation, safety, or functionality.
+No application-menu relabeling or Python installation changes are performed.
+
+Native application identity, a custom icon, a self-contained runtime, signing,
+notarization, and distribution are deferred to **v2.0.0**.

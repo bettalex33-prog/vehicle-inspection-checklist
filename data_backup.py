@@ -193,7 +193,7 @@ def create_backup(paths: RuntimePaths, output_dir: Path, *, timestamp=None) -> P
         raise BackupValidationError('Backup timestamp must be timezone-aware.')
     stamp = stamp.astimezone(timezone.utc)
     manifest = {'manifest_version': 1, 'application': 'vehicle-maintenance-checklist',
-                'release': '1.8.0', 'created_at': stamp.isoformat(),
+                'release': '1.9.0', 'created_at': stamp.isoformat(),
                 'files': [{'filename': name, 'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}
                           for name, payload in sorted(files)]}
     buffer = io.BytesIO()
@@ -242,7 +242,7 @@ def validate_backup(archive_path: Path) -> ValidatedBackup:
 def _validate_manifest(manifest, payloads):
     if (not isinstance(manifest, dict) or set(manifest) != {'manifest_version', 'application', 'release', 'created_at', 'files'}
             or type(manifest['manifest_version']) is not int or manifest['manifest_version'] != 1
-            or manifest['application'] != 'vehicle-maintenance-checklist' or manifest['release'] not in ('1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0')
+            or manifest['application'] != 'vehicle-maintenance-checklist' or manifest['release'] not in ('1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0')
             or not isinstance(manifest['files'], list)):
         raise BackupValidationError('Malformed or unsupported manifest.')
     try:

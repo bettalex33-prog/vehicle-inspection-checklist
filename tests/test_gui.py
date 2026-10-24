@@ -12,6 +12,15 @@ from datetime import datetime, timezone
 
 
 class TestChecklistGUI(unittest.TestCase):
+    def test_packaged_runtime_paths_reach_all_windows(self):
+        from application_paths import packaged_paths
+        paths = packaged_paths(self.data_path.parent / "fixture home 空")
+        with patch.object(gui.ChecklistApp, '__init__', return_value=None) as init, \
+             patch.object(gui.tk, 'Tk') as factory:
+            gui.main(paths)
+        init.assert_called_once_with(factory.return_value, paths.checklist, paths.history,
+                                     paths.profiles, paths.maintenance)
+
     def test_standard_widgets_keep_native_configuration(self):
         forbidden = {'foreground', 'background', 'fg', 'bg', 'font', 'style'}
         for name in ('Label', 'Entry', 'Text', 'Checkbutton'):
