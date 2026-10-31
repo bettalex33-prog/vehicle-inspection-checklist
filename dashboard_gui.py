@@ -152,8 +152,14 @@ class DashboardWindow:
             horizontal.grid(row=1, column=0, sticky='ew')
             text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
             text.bind('<Tab>', self._next_control)
-            text.bind('<Shift-Tab>', lambda event: self._next_control(event, backward=True))
-            text.bind('<ISO_Left_Tab>', lambda event: self._next_control(event, backward=True))
+            backward = lambda event: self._next_control(event, backward=True)
+            # Tk keysyms vary by platform. Each alias is optional; Tk chooses
+            # one matching binding per widget, and 'break' stops class traversal.
+            for sequence in ('<Shift-Tab>', '<ISO_Left_Tab>'):
+                try:
+                    text.bind(sequence, backward)
+                except tk.TclError:
+                    pass
             self.panels[key] = text
         actions = ttk.Frame(self.root, padding=12)
         actions.grid(row=4, column=0, sticky='ew')

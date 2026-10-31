@@ -1,12 +1,16 @@
-"""Fake Tk components and fake controllers only; never construct a real GUI."""
+"""Fake Tk only; controller integration uses injected in-memory captures."""
+import builtins
 from copy import deepcopy
 from datetime import date
 import importlib
+import io
+import os
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import dashboard_gui as dg
+from dashboard_controller import DashboardController
 
 DAY = date(2026, 10, 31)
 PID, OTHER, ORPHAN = 'stable-a', 'stable-b', 'historical-id'
@@ -287,6 +291,253 @@ class TestDashboardGUI(unittest.TestCase):
     def assert_disabled(self):
         self.assertTrue(all(button.options['state'] == 'disabled' for button in self.window.buttons.values()))
 
+    def real_controller_window(self):
+        """Exercise the public controller contract without sources or storage."""
+        template = presentation()
+        captures, supplied, events = [], [], []
+
+        def capture(**inputs):
+            snapshot = SimpleNamespace(stale=False)
+            snapshot.model = dict(
+                stores=dict(
+                    checklist=dict(availability='Available', data={'oil': {'complete': False}}),
+                    profiles=dict(availability='Available', data={'profiles': [
+                        {'profile_id': PID}, {'profile_id': OTHER}]}),
+                    history=dict(availability='Available', data={'inspections': []}),
+                    maintenance=dict(availability='Available', data={'tasks': []})),
+                insights=dict(availability='Available', data=dict(
+                    inputs, input_error=None, export_available=True)))
+
+            def revalidate():
+                events.append('revalidate')
+                if snapshot.stale:
+                    raise ValueError('Synthetic sources changed')
+
+            snapshot.revalidate = Mock(side_effect=revalidate)
+            captures.append((snapshot, deepcopy(snapshot.model)))
+            events.append('capture')
+            return snapshot
+
+        def project(facts, checklist, *, scope_profile_id):
+            self.assertEqual(checklist, {'oil': {'complete': False}})
+            output = deepcopy(template)
+            output.update(as_of=facts['as_of'].isoformat(), scope_profile_id=scope_profile_id)
+            output['evaluation'].update(selected_profile_id=facts['selected_profile_id'],
+                explicit_current_mileage=facts['explicit_current_mileage'])
+            for key in ('cost_start_date', 'cost_end_date'):
+                output['service_cost_summary'][key] = facts[key]
+            supplied.append((output, deepcopy(output)))
+            events.append('project')
+            return output
+
+        factory, projector = Mock(side_effect=capture), Mock(side_effect=project)
+        self.controller = DashboardController(factory, as_of=DAY, projector=projector)
+        # Fail closed if construction or any later view event attempts IO,
+        # JSON, path discovery, or real source discovery. Tk/root/event-loop
+        # constructors remain forbidden by setUp's fake-widget patches.
+        for namespace, name in ((builtins, 'open'), (io, 'open'), (os, 'open')):
+            patcher = patch.object(namespace, name, side_effect=AssertionError('Filesystem forbidden'))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        original_import = builtins.__import__
+
+        def isolated_import(name, *args, **kwargs):
+            if name.split('.')[0] in ('application_paths', 'data_backup', 'dashboard_sources', 'json'):
+                raise AssertionError('Live dependency forbidden: ' + name)
+            return original_import(name, *args, **kwargs)
+
+        patcher = patch.object(builtins, '__import__', side_effect=isolated_import)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.window = self.new_window(self.controller)
+        return SimpleNamespace(factory=factory, projector=projector, captures=captures,
+            supplied=supplied, events=events, template=template)
+
+    def assert_supplied_data_unchanged(self, fixture):
+        self.assertEqual(fixture.template, presentation())
+        for output, before in fixture.supplied:
+            self.assertEqual(output, before)
+        for snapshot, before in fixture.captures:
+            self.assertEqual(snapshot.model, before)
+
+    def test_layout_top_level_regions_are_distinct_and_only_content_expands(self):
+        # Structural regression only; native Tk 9 smoke is the painting evidence.
+        root = self.window.root
+        children = [w for w in self.created if w.parent is root]
+        notices = {w.options.get('textvariable'): w for w in children if w.kind == 'Label'}
+        action_bar = self.window.buttons['history'].parent
+        regions = (self.window.controls, notices[self.window.notice],
+                   notices[self.window.content_notice], self.window.notebook, action_bar)
+        self.assertEqual(set(children), set(regions))
+        occupied = set()
+        for row, widget in enumerate(regions):
+            self.assertIs(widget.parent, root)
+            grid = widget.grid_options
+            self.assertEqual((grid['row'], grid['column']), (row, 0))
+            cells = {(r, c) for r in range(row, row + grid.get('rowspan', 1))
+                     for c in range(grid['column'], grid['column'] + grid.get('columnspan', 1))}
+            self.assertFalse(occupied & cells)
+            occupied.update(cells)
+        self.assertEqual(root.rows, {3: {'weight': 1}})
+        self.assertEqual(root.columns, {0: {'weight': 1}})
+        self.assertEqual(self.window.controls.columns, {1: {'weight': 1}})
+        self.assertEqual(self.window.controls.rows, {})
+        self.assertEqual(action_bar.rows, {})
+        self.assertEqual(self.window.notebook.grid_options['sticky'], 'nsew')
+
+    def test_layout_each_panel_owns_its_text_and_both_scrollbars(self):
+        pages = [page for page, options in self.window.notebook.tabs]
+        self.assertEqual(len(set(pages)), len(dg.PANELS))
+        for (key, title, field), page in zip(dg.PANELS, pages):
+            with self.subTest(panel=key):
+                self.assertIs(page.parent, self.window.notebook)
+                self.assertEqual(page.rows, {0: {'weight': 1}})
+                self.assertEqual(page.columns, {0: {'weight': 1}})
+                text = self.window.panels[key]
+                self.assertIs(text.parent, page)
+                children = [w for w in self.created if w.parent is page]
+                self.assertEqual(len(children), 3)
+                scrollbars = {w.options['orient']: w for w in children if w.kind == 'Scrollbar'}
+                self.assertEqual(set(scrollbars), {'vertical', 'horizontal'})
+                for widget, cell in ((text, (0, 0)), (scrollbars['vertical'], (0, 1)),
+                                     (scrollbars['horizontal'], (1, 0))):
+                    self.assertEqual((widget.grid_options['row'], widget.grid_options['column']), cell)
+                    self.assertEqual(widget.grid_options.get('rowspan', 1), 1)
+                    self.assertEqual(widget.grid_options.get('columnspan', 1), 1)
+                self.assertEqual(scrollbars['vertical'].options['command'], text.yview)
+                self.assertEqual(scrollbars['horizontal'].options['command'], text.xview)
+                self.assertEqual(text.options['yscrollcommand'], scrollbars['vertical'].set)
+                self.assertEqual(text.options['xscrollcommand'], scrollbars['horizontal'].set)
+        self.assertEqual({w.parent for w in self.created if w.kind in ('Text', 'Scrollbar')}, set(pages))
+
+    def test_layout_actions_and_close_are_separate_from_notebook_content(self):
+        action_bar = self.window.buttons['history'].parent
+        self.assertIs(action_bar.parent, self.window.root)
+        self.assertEqual(action_bar.grid_options['row'], 4)
+        self.assertEqual(action_bar.grid_options.get('rowspan', 1), 1)
+        self.assertEqual(self.window.notebook.grid_options['row'], 3)
+        buttons = [w for w in self.created if w.parent is action_bar]
+        self.assertEqual(len(buttons), len(dg.ACTIONS) + 1)
+        cells = []
+        for index, (key, label) in enumerate(dg.ACTIONS):
+            button = self.window.buttons[key]
+            self.assertIs(button.parent, action_bar)
+            self.assertEqual((button.grid_options['row'], button.grid_options['column']),
+                             (index // 2, index % 2))
+            cells.append((button.grid_options['row'], button.grid_options['column']))
+        close, = [w for w in buttons if w.options['text'] == 'Close']
+        self.assertEqual((close.grid_options['row'], close.grid_options['column']), (2, 1))
+        self.assertNotIn((2, 1), cells)
+        self.assertEqual(close.options['command'], self.window.close)
+        for button in buttons:
+            self.assertEqual(button.grid_options.get('rowspan', 1), 1)
+            self.assertEqual(button.grid_options.get('columnspan', 1), 1)
+
+    def test_real_controller_refresh_scope_and_explicit_mileage_forwarding(self):
+        fixture = self.real_controller_window()
+        fixture.factory.assert_not_called()
+        fixture.projector.assert_not_called()
+        self.assertEqual(self.controller.state['status'], 'empty')
+        self.window.refresh_button.invoke()
+        self.assertEqual(self.controller.state['status'], 'ready')
+        self.assertIn('Current presentation', self.window.content_notice.get())
+        fixture.factory.assert_called_once_with(as_of=DAY, cost_start_date=None, cost_end_date=None,
+            selected_profile_id=None, explicit_current_mileage=None)
+        self.assertEqual(fixture.events, ['capture', 'project', 'revalidate'])
+        with patch.object(self.controller, 'select_scope', wraps=self.controller.select_scope) as scope, \
+             patch.object(self.controller, 'set_explicit_mileage', wraps=self.controller.set_explicit_mileage) as mileage:
+            self.choose(PID)
+            scope.assert_called_once_with(PID)
+            self.assertEqual(self.controller.state['selected_profile_id'], PID)
+            before = self.controller.state
+            self.window.variables['explicit_current_mileage'].set('000123')
+            self.assertEqual(self.controller.state, before)
+            self.window.refresh_button.invoke()
+            mileage.assert_called_once_with(123)
+        fixture.factory.assert_called_with(as_of=DAY, cost_start_date=None, cost_end_date=None,
+            selected_profile_id=PID, explicit_current_mileage=123)
+        self.assertEqual(self.controller.state['presentation']['scope_profile_id'], PID)
+        self.assertEqual(self.controller.state['explicit_current_mileage'], 123)
+        self.assertEqual(self.window.notice.get(), 'Ready.')
+        self.assert_supplied_data_unchanged(fixture)
+
+    def test_real_controller_navigation_revalidates_before_owned_callback(self):
+        fixture = self.real_controller_window()
+        self.window.refresh_button.invoke()
+        snapshot = fixture.captures[-1][0]
+        before = self.controller.state
+
+        def consume(payload):
+            self.assertEqual(fixture.events, ['capture', 'project', 'revalidate', 'revalidate'])
+            self.assertTrue(self.controller.state['action_in_progress'])
+            self.assertEqual(payload, before['presentation'])
+            payload['maintenance']['status_totals'].clear()
+
+        self.callbacks['history'].side_effect = consume
+        with patch.object(self.controller, 'perform_action', wraps=self.controller.perform_action) as action:
+            self.window.buttons['history'].invoke()
+            action.assert_called_once()
+            # Assertion failures inside the callback are caught by the view;
+            # require successful UI recovery before editing can clear its error.
+            self.assertEqual(self.window.notice.get(), 'Ready.')
+            self.assertEqual(self.controller.state, before)
+            self.window.variables['as_of'].set('invalid pending draft')
+            draft_state = self.controller.state
+            self.window.render()
+            self.window.navigate('history')
+            self.assertEqual(action.call_count, 1)
+            self.assertEqual(self.controller.state, draft_state)
+        self.callbacks['history'].assert_called_once()
+        self.assertEqual(snapshot.revalidate.call_count, 2)
+        self.assertEqual(fixture.factory.call_count, 1)
+        self.assertEqual(self.controller.state, before)
+        self.assert_supplied_data_unchanged(fixture)
+
+    def test_real_controller_stale_capture_rejects_action_and_retains_output(self):
+        fixture = self.real_controller_window()
+        self.window.refresh_button.invoke()
+        before = self.controller.state['presentation']
+        snapshot = fixture.captures[-1][0]
+        snapshot.stale = True  # External source change, unseen by the view.
+        self.assertEqual(self.window.buttons['history'].options['state'], 'normal')
+        with patch.object(self.controller, 'perform_action', wraps=self.controller.perform_action) as action:
+            self.window.buttons['history'].invoke()
+            action.assert_called_once()
+        self.callbacks['history'].assert_not_called()
+        self.assertEqual(snapshot.revalidate.call_count, 2)
+        self.assertEqual(self.controller.state['status'], 'error')
+        self.assertIsNone(self.controller.state['presentation'])
+        self.assertEqual(self.controller.state['last_successful_presentation'], before)
+        self.assertIn('Synthetic sources changed', self.window.notice.get())
+        self.assertIn('STALE retained content', self.window.content_notice.get())
+        self.assert_disabled()
+        self.assert_supplied_data_unchanged(fixture)
+
+    def test_real_controller_invalidation_keeps_stale_content_without_view_mutation(self):
+        fixture = self.real_controller_window()
+        self.window.refresh_button.invoke()
+        self.choose(PID)
+        self.window.variables['explicit_current_mileage'].set('123')
+        self.window.refresh_button.invoke()
+        panels = {key: text.content for key, text in self.window.panels.items()}
+        published = self.controller.state['presentation']
+        self.controller.invalidate()
+        before = self.controller.state
+        self.window.render()
+        self.window.navigate('history')
+        self.assertEqual(self.controller.state, before)
+        self.assertIsNone(before['presentation'])
+        self.assertEqual(before['last_successful_presentation'], published)
+        self.assertEqual({key: text.content for key, text in self.window.panels.items()}, panels)
+        self.assertEqual(self.window.variables['explicit_current_mileage'].get(), '')
+        self.assertIn('STALE retained content', self.window.content_notice.get())
+        self.assert_disabled()
+        self.callbacks['history'].assert_not_called()
+        self.assertEqual(fixture.factory.call_count, 2)
+        for snapshot, model in fixture.captures:
+            snapshot.revalidate.assert_called_once_with()
+        self.assert_supplied_data_unchanged(fixture)
+
     def test_import_has_no_startup_effects(self):
         with patch.object(dg.tk, 'Toplevel', side_effect=AssertionError('No import window')), \
              patch.object(dg.ttk, 'Frame', side_effect=AssertionError('No import widgets')):
@@ -340,6 +591,57 @@ class TestDashboardGUI(unittest.TestCase):
             for event in ('<Tab>', '<Shift-Tab>', '<ISO_Left_Tab>'):
                 self.assertEqual(text.bindings[event](SimpleNamespace(widget=text)), 'break')
                 self.assertTrue(text.focused)
+
+    def test_optional_backward_alias_errors_do_not_prevent_construction(self):
+        original_bind = Widget.bind
+        for rejected in (('<ISO_Left_Tab>',), ('<Shift-Tab>',),
+                         ('<Shift-Tab>', '<ISO_Left_Tab>')):
+            with self.subTest(rejected=rejected):
+                attempts = []
+
+                def bind(widget, sequence, callback):
+                    attempts.append((widget, sequence))
+                    if sequence in rejected:
+                        keysym = sequence[1:-1]
+                        raise dg.tk.TclError('bad event type or keysym "' + keysym + '"')
+                    original_bind(widget, sequence, callback)
+
+                with patch.object(Widget, 'bind', bind):
+                    window = self.new_window()
+                self.assertEqual(len(window.panels), len(dg.PANELS))
+                self.assertEqual(self.controller.calls, [])
+                for text in window.panels.values():
+                    self.assertIn('<Tab>', text.bindings)
+                    for sequence in ('<Shift-Tab>', '<ISO_Left_Tab>'):
+                        self.assertIn((text, sequence), attempts)
+                        if sequence in rejected:
+                            self.assertNotIn(sequence, text.bindings)
+                        else:
+                            target = Mock()
+                            with patch.object(text, 'tk_focusPrev', return_value=target) as previous:
+                                self.assertEqual(text.bindings[sequence](SimpleNamespace(widget=text)), 'break')
+                            previous.assert_called_once_with()
+                            target.focus_set.assert_called_once_with()
+
+    def test_both_backward_aliases_traverse_once_and_stop_default_handling(self):
+        for text in self.window.panels.values():
+            self.assertIs(text.bindings['<Shift-Tab>'], text.bindings['<ISO_Left_Tab>'])
+            # Tk selects one matching binding per bindtag, even when both
+            # aliases are registered. Either selected alias must stop dispatch.
+            for sequence in ('<Shift-Tab>', '<ISO_Left_Tab>'):
+                with self.subTest(panel=text, sequence=sequence):
+                    target = Mock()
+                    default_traversal = Mock()
+                    with patch.object(text, 'tk_focusPrev', return_value=target) as previous, \
+                         patch.object(text, 'tk_focusNext') as following:
+                        result = text.bindings[sequence](SimpleNamespace(widget=text))
+                        if result != 'break':
+                            default_traversal()
+                    self.assertEqual(result, 'break')
+                    previous.assert_called_once_with()
+                    following.assert_not_called()
+                    target.focus_set.assert_called_once_with()
+                    default_traversal.assert_not_called()
 
     def test_successful_refresh_renders_every_panel(self):
         self.window.refresh()
