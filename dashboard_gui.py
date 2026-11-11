@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import date
 import tkinter as tk
 from tkinter import ttk
+from dashboard_model import build_backup_panel
 
 
 PANELS = (
@@ -68,6 +69,8 @@ def _panel_text(presentation):
         raise ValueError('Evaluation presentation is malformed.')
     result = {}
     for key, title, field in PANELS:
+        if key == 'backup':
+            continue  # Independent controller publication, never analytical content.
         value = presentation[field]
         if not isinstance(value, list if key == 'history' else Mapping):
             raise ValueError(title + ' presentation is malformed.')
@@ -81,19 +84,20 @@ def _panel_text(presentation):
                        profile_status='Missing profile; historical identity retained'
                        if v.get('profile_missing') else 'Live profile') for v in vehicles]
     result['history'] = 'Vehicle identities:\n' + _text(identities) + '\n\nRecent services:\n' + result['history']
-    if presentation['backup_health'].get('availability') != 'Unavailable':
-        raise ValueError('Backup health must remain unavailable; it is not implemented.')
-    result['backup'] = 'Backup health: Unavailable — not implemented in this phase.\n\n' + result['backup']
     return result
 
 
 class DashboardWindow:
     """Native ttk controls in a Toplevel; no default-app integration or storage."""
     def __init__(self, parent, controller, *, open_inspection=None,
-                 open_maintenance=None, open_maintenance_insights=None, open_history=None):
+                 open_maintenance=None, open_maintenance_insights=None, open_history=None,
+                 choose_backup_archive=None):
         if parent is None:
             raise ValueError('An existing Tk parent is required; no root is created.')
         self.controller = controller
+        self._choose_backup_archive = choose_backup_archive
+        self._backup_busy = False
+        self._backup_error = None
         self.callbacks = dict(inspection=open_inspection, maintenance=open_maintenance,
                               insights=open_maintenance_insights, history=open_history)
         self._closed = self._syncing = self._busy = self._form_dirty = False
@@ -161,6 +165,16 @@ class DashboardWindow:
                 except tk.TclError:
                     pass
             self.panels[key] = text
+            if key == 'backup':
+                controls = ttk.Frame(page)
+                controls.grid(row=2, column=0, columnspan=2, sticky='ew')
+                self.backup_buttons = {}
+                for column, (name, label) in enumerate((('choose', 'Choose archive…'),
+                        ('assess', 'Assess selected archive'), ('clear', 'Clear selection'))):
+                    button = ttk.Button(controls, text=label, takefocus=True,
+                        command=lambda name=name: self.backup_command(name))
+                    button.grid(row=0, column=column, sticky='w')
+                    self.backup_buttons[name] = button
         actions = ttk.Frame(self.root, padding=12)
         actions.grid(row=4, column=0, sticky='ew')
         self.buttons = {}
@@ -285,6 +299,19 @@ class DashboardWindow:
         for key, button in self.buttons.items():
             button.configure(state='normal' if enabled and self.callbacks[key] is not None else 'disabled')
         busy = self._busy or state.get('loading') or state.get('action_in_progress')
+        backup = state.get('backup_health', build_backup_panel(status='unavailable'))
+        backup_busy = self._backup_busy or backup.get('loading') or backup.get('action_in_progress')
+        self.backup_buttons['choose'].configure(state='normal' if not backup_busy
+            and backup.get('inspection_available') and self._choose_backup_archive is not None else 'disabled')
+        self.backup_buttons['assess'].configure(state='normal' if not backup_busy
+            and backup.get('assess_ready') else 'disabled')
+        self.backup_buttons['clear'].configure(state='normal' if not backup_busy
+            and backup.get('selected') else 'disabled')
+        panel_text['backup'] = _text({key: backup.get(key) for key in (
+            'message', 'semantics', 'healthy', 'partial', 'differs',
+            'recorded_created_at', 'release', 'reasons', 'stores')})
+        if self._backup_error:
+            panel_text['backup'] += '\n' + self._backup_error
         self.refresh_button.configure(state='disabled' if busy else 'normal')
         self.selector.configure(state='disabled' if busy else 'readonly')
         for entry in self.entries.values():
@@ -296,6 +323,42 @@ class DashboardWindow:
             widget.configure(state='disabled')
         self._shown_key = (state.get('revision'), state.get('publication_generation'))
         self._seen_controller_revision = state.get('revision')
+
+    def backup_command(self, name):
+        """Explicit commands; recover from one cancellation, including cleanup.
+
+        The outer handler restores the view guard if setup or normal cleanup is
+        interrupted. It never repeats the command or rolls back controller work.
+        Repeated asynchronous exceptions during recovery are not supported.
+        """
+        if self._closed or self._backup_busy:
+            return
+        state = self._state().get('backup_health', {})
+        if state.get('loading') or state.get('action_in_progress'):
+            return
+        try:
+            try:
+                self._backup_busy = True
+                self._backup_error = None
+                if name == 'choose' and self._choose_backup_archive is not None:
+                    selected = self._choose_backup_archive()
+                    if selected is not None and selected != '' and not self._closed:
+                        if self._state().get('backup_health', {}).get('revision') != state.get('revision'):
+                            raise ValueError('Backup session changed during selection.')
+                        self.controller.select_backup_archive(selected)
+                elif name == 'assess':
+                    self.controller.refresh_backup()
+                elif name == 'clear':
+                    self.controller.select_backup_archive(None)
+            except Exception:
+                # Chooser/factory exception strings may contain private paths.
+                self._backup_error = 'Backup operation failed; select or assess again.'
+            finally:
+                self._backup_busy = False
+                self.render()
+        except BaseException:
+            self._backup_busy = False
+            raise
 
     def inputs_changed(self, *args):
         if self._syncing or self._closed:

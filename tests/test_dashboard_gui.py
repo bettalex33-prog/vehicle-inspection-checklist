@@ -3,14 +3,17 @@ import builtins
 from copy import deepcopy
 from datetime import date
 import importlib
+import inspect
 import io
 import os
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import dashboard_gui as dg
 from dashboard_controller import DashboardController
+from test_dashboard_controller import BackupEvidence
 
 DAY = date(2026, 10, 31)
 PID, OTHER, ORPHAN = 'stable-a', 'stable-b', 'historical-id'
@@ -291,7 +294,7 @@ class TestDashboardGUI(unittest.TestCase):
     def assert_disabled(self):
         self.assertTrue(all(button.options['state'] == 'disabled' for button in self.window.buttons.values()))
 
-    def real_controller_window(self):
+    def real_controller_window(self, backup_factory=None):
         """Exercise the public controller contract without sources or storage."""
         template = presentation()
         captures, supplied, events = [], [], []
@@ -331,7 +334,8 @@ class TestDashboardGUI(unittest.TestCase):
             return output
 
         factory, projector = Mock(side_effect=capture), Mock(side_effect=project)
-        self.controller = DashboardController(factory, as_of=DAY, projector=projector)
+        self.controller = DashboardController(factory, as_of=DAY, projector=projector,
+                                              backup_assessment_factory=backup_factory)
         # Fail closed if construction or any later view event attempts IO,
         # JSON, path discovery, or real source discovery. Tk/root/event-loop
         # constructors remain forbidden by setUp's fake-widget patches.
@@ -396,7 +400,7 @@ class TestDashboardGUI(unittest.TestCase):
                 text = self.window.panels[key]
                 self.assertIs(text.parent, page)
                 children = [w for w in self.created if w.parent is page]
-                self.assertEqual(len(children), 3)
+                self.assertEqual(len(children), 4 if key == 'backup' else 3)
                 scrollbars = {w.options['orient']: w for w in children if w.kind == 'Scrollbar'}
                 self.assertEqual(set(scrollbars), {'vertical', 'horizontal'})
                 for widget, cell in ((text, (0, 0)), (scrollbars['vertical'], (0, 1)),
@@ -653,7 +657,7 @@ class TestDashboardGUI(unittest.TestCase):
         self.assertIn('Recorded next due mileage: 1000', self.window.panels['maintenance'].content)
         self.assertIn('Historical oil', self.window.panels['history'].content)
         self.assertIn('missing_live_profile', self.window.panels['quality'].content)
-        self.assertIn('Unavailable — not implemented', self.window.panels['backup'].content)
+        self.assertIn('Backup inspection unavailable', self.window.panels['backup'].content)
 
     def test_duplicate_display_names_have_distinct_stable_id_choices(self):
         self.ready()
@@ -810,7 +814,9 @@ class TestDashboardGUI(unittest.TestCase):
                 self.window.render()
                 self.assertIn('Unavailable', self.window.content_notice.get())
                 self.assert_disabled()
-                self.assertTrue(all('no usable presentation' in panel.content for panel in self.window.panels.values()))
+                self.assertTrue(all('no usable presentation' in panel.content
+                                    for key, panel in self.window.panels.items() if key != 'backup'))
+                self.assertIn('Backup inspection unavailable', self.window.panels['backup'].content)
         self.controller.data['presentation'] = presentation()
         self.controller.data['presentation']['maintenance'] = None
         self.window.render()
@@ -1089,7 +1095,238 @@ class TestDashboardGUI(unittest.TestCase):
         self.window.render()
         self.assert_disabled()
 
-    def test_duplicate_stable_ids_or_invalid_backup_contract_are_malformed(self):
+    def test_backup_controls_render_without_analytics_and_cancel_preserves_selection(self):
+        evidence = BackupEvidence()
+        factory = Mock(return_value=evidence)
+        self.real_controller_window(factory)
+        self.assertIn('No archive selected', self.window.panels['backup'].content)
+        self.assertIsNone(self.controller.state['presentation'])
+        chooser = Mock(return_value='/private/secret/archive.zip')
+        self.window._choose_backup_archive = chooser
+        self.window.render()
+        self.window.backup_buttons['choose'].invoke()
+        self.assertEqual(self.controller.backup_state['status'], 'required')
+        factory.assert_not_called()
+        self.assertNotIn('/private', self.window.panels['backup'].content)
+        self.window.backup_buttons['assess'].invoke()
+        factory.assert_called_once_with('/private/secret/archive.zip')
+        self.assertIn('Complete exact-byte match', self.window.panels['backup'].content)
+        self.assertIn('Last assessed', self.window.panels['backup'].content)
+        self.assertNotIn('safe to restore', self.window.panels['backup'].content)
+        self.assertNotIn('recent backup', self.window.panels['backup'].content)
+        before = self.controller.backup_state
+        for cancel in (None, ''):
+            chooser.return_value = cancel
+            self.window.backup_buttons['choose'].invoke()
+            self.assertEqual(self.controller.backup_state, before)
+        self.window.backup_buttons['clear'].invoke()
+        self.assertEqual(self.controller.backup_state['status'], 'no_selection')
+        self.assertNotIn('Complete exact-byte match', self.window.panels['backup'].content)
+        self.assertEqual(self.window.backup_buttons['assess'].options['state'], 'disabled')
+
+    def test_stale_and_invalid_backup_do_not_disable_analytical_actions(self):
+        evidence = BackupEvidence()
+        self.real_controller_window(Mock(return_value=evidence))
+        self.window.refresh()
+        self.controller.select_backup_archive('/private/archive.zip')
+        self.controller.refresh_backup()
+        def stale(): raise ValueError('/private/error')
+        evidence.hook = stale
+        with self.assertRaises(ValueError): self.controller.perform_backup_action(lambda p: self.fail())
+        self.window.render()
+        self.assertIn('Stale', self.window.panels['backup'].content)
+        self.assertFalse(self.controller.backup_state['action_ready'])
+        self.assertTrue(all(b.options['state'] == 'normal' for b in self.window.buttons.values()))
+        evidence.hook = None
+        evidence.report.update(availability='Invalid', coverage='invalid', healthy=False)
+        evidence.report['archive']['payload_valid'] = False
+        self.window.backup_buttons['assess'].invoke()
+        self.assertIn('Invalid archive', self.window.panels['backup'].content)
+        self.assertFalse(self.controller.backup_state['action_ready'])
+        self.assertTrue(all(b.options['state'] == 'normal' for b in self.window.buttons.values()))
+        self.window.navigate('inspection')
+        self.callbacks['inspection'].assert_called_once()
+
+    def test_backup_panel_survives_failed_analytical_refresh_and_unsubmitted_form(self):
+        evidence = BackupEvidence()
+        fixture = self.real_controller_window(Mock(return_value=evidence))
+        self.controller.select_backup_archive('archive.zip')
+        self.controller.refresh_backup()
+        fixture.factory.side_effect = ValueError('analytical failure')
+        self.window.refresh()
+        self.assertIn('Complete exact-byte match', self.window.panels['backup'].content)
+        self.window.variables['as_of'].set('invalid')
+        self.assertEqual(self.window.backup_buttons['assess'].options['state'], 'normal')
+        self.window.backup_buttons['assess'].invoke()
+        self.assertTrue(self.controller.backup_state['healthy'])
+
+    def test_unavailable_backup_controls_and_constructor_do_not_read(self):
+        fixture = self.real_controller_window()
+        fixture.factory.assert_not_called()
+        self.assertIn('Backup inspection unavailable', self.window.panels['backup'].content)
+        self.assertTrue(all(b.options['state'] == 'disabled' for b in self.window.backup_buttons.values()))
+        self.assertEqual(set(self.window.backup_buttons), {'choose', 'assess', 'clear'})
+
+    def test_chooser_and_factory_errors_do_not_expose_exception_paths(self):
+        factory = Mock(side_effect=ValueError('/private/secret/factory'))
+        self.real_controller_window(factory)
+        self.window._choose_backup_archive = Mock(side_effect=ValueError('/private/secret/chooser'))
+        self.window.backup_command('choose')
+        self.assertNotIn('/private', self.window.panels['backup'].content)
+        self.assertIn('operation failed', self.window.panels['backup'].content)
+        self.controller.select_backup_archive('/private/secret/archive')
+        self.window.backup_command('assess')
+        self.assertIn('Backup assessment error', self.window.panels['backup'].content)
+        self.assertNotIn('/private', self.window.panels['backup'].content)
+        self.assertIsNone(self.window._local_error)
+
+    def test_restore_during_chooser_cannot_resurrect_selection(self):
+        self.real_controller_window(Mock(return_value=BackupEvidence()))
+        self.controller.select_backup_archive('old.zip')
+        self.controller.refresh_backup()
+        def choose():
+            self.controller.invalidate()
+            return '/private/secret/old.zip'
+        self.window._choose_backup_archive = choose
+        self.window.backup_command('choose')
+        self.assertFalse(self.controller.backup_state['selected'])
+        self.assertFalse(self.controller.backup_state['healthy'])
+        self.assertNotIn('/private', self.window.panels['backup'].content)
+
+    def test_backup_assessment_cancellation_clears_view_guard(self):
+        failure = KeyboardInterrupt('cancel')
+        factory = Mock(side_effect=failure)
+        self.real_controller_window(factory)
+        self.controller.select_backup_archive('archive.zip')
+        with self.assertRaises(KeyboardInterrupt) as caught: self.window.backup_command('assess')
+        self.assertIs(caught.exception, failure)
+        self.assertFalse(self.window._backup_busy)
+        self.assertEqual(self.controller.backup_state['status'], 'required')
+
+    def test_backup_command_cancellation_matrix_preserves_state_and_next_commands(self):
+        source, start = inspect.getsourcelines(dg.DashboardWindow.backup_command)
+        setup = start + next(i for i, line in enumerate(source) if 'self._backup_busy = True' in line)
+        after_setup = start + next(i for i, line in enumerate(source) if 'self._backup_error = None' in line)
+        cleanup = start + next(i for i, line in enumerate(source) if 'self._backup_busy = False' in line)
+        after_cleanup = start + next(i for i, line in enumerate(source) if 'self.render()' in line)
+        stages = ('before_setup', 'after_setup', 'operation', 'before_cleanup', 'cleanup', 'after_cleanup')
+        for command in ('choose', 'assess', 'clear'):
+            for error_type in (KeyboardInterrupt, SystemExit, GeneratorExit):
+                for stage in stages:
+                    with self.subTest(command=command, error=error_type, stage=stage):
+                        fixture = TestDashboardGUI()
+                        fixture.setUp()
+                        try:
+                            fixture.real_controller_window(Mock(return_value=BackupEvidence()))
+                            controller, window = fixture.controller, fixture.window
+                            controller.select_backup_archive('old.zip')
+                            controller.refresh_backup()
+                            before, analytical = controller.backup_state, controller._session
+                            completed, calls = [], []
+                            failure = error_type('single injected cancellation')
+                            fired = False
+                            def cancel():
+                                nonlocal fired
+                                if not fired:
+                                    fired = True
+                                    raise failure
+                            original_select, original_refresh = controller.select_backup_archive, controller.refresh_backup
+                            def choose():
+                                calls.append('choose')
+                                if stage == 'operation' and command == 'choose': cancel()
+                                return 'new.zip'
+                            def operate(kind, operation, *args):
+                                calls.append(kind)
+                                result = operation(*args)
+                                completed.append(controller.backup_state)
+                                if stage == 'operation': cancel()
+                                return result
+                            def select(path):
+                                return operate('select', original_select, path)
+                            def assess():
+                                return operate('assess', original_refresh)
+                            controller.select_backup_archive = select
+                            controller.refresh_backup = assess
+                            window._choose_backup_archive = choose
+                            lines = dict(before_setup=setup, after_setup=after_setup,
+                                         cleanup=cleanup, after_cleanup=after_cleanup)
+                            def trace(frame, event, arg):
+                                if not fired:
+                                    if (stage in lines and event == 'line'
+                                            and frame.f_code is dg.DashboardWindow.backup_command.__code__
+                                            and frame.f_lineno == lines[stage]): cancel()
+                                    if (stage == 'before_cleanup' and event == 'return'
+                                            and frame.f_code is operate.__code__): cancel()
+                                return trace
+                            sys.settrace(trace)
+                            try:
+                                with self.assertRaises(error_type) as caught: window.backup_command(command)
+                            finally: sys.settrace(None)
+                            self.assertTrue(fired)
+                            self.assertIs(caught.exception, failure)
+                            self.assertFalse(window._backup_busy)
+                            self.assertIsNone(window._backup_error)
+                            self.assertIs(controller._session, analytical)
+                            self.assertEqual(controller.backup_state, completed[-1] if completed else before)
+                            self.assertLessEqual(calls.count('choose'), 1)
+                            self.assertLessEqual(calls.count('select'), 1)
+                            self.assertLessEqual(calls.count('assess'), 1)
+                            # All three commands work after the cancellation;
+                            # recovery never repeats the interrupted command.
+                            calls.clear()
+                            window.backup_command('choose')
+                            self.assertEqual(controller.backup_state['status'], 'required')
+                            window.backup_command('assess')
+                            self.assertTrue(controller.backup_state['healthy'])
+                            window.backup_command('clear')
+                            self.assertFalse(controller.backup_state['selected'])
+                            self.assertEqual(calls, ['choose', 'select', 'assess', 'select'])
+                            self.assertIs(controller._session, analytical)
+                        finally:
+                            sys.settrace(None)
+                            fixture.doCleanups()
+
+    def test_backup_command_cancellation_preserves_intentional_invalidation(self):
+        for command in ('choose', 'assess', 'clear'):
+            for error_type in (KeyboardInterrupt, SystemExit, GeneratorExit):
+                with self.subTest(command=command, error=error_type):
+                    fixture = TestDashboardGUI()
+                    fixture.setUp()
+                    try:
+                        fixture.real_controller_window(Mock(return_value=BackupEvidence()))
+                        controller, window = fixture.controller, fixture.window
+                        controller.select_backup_archive('old.zip')
+                        controller.refresh_backup()
+                        failure = error_type('cancel after intentional invalidation')
+                        completed, calls = [], []
+                        def invalidate(*args):
+                            calls.append(command)
+                            controller.invalidate()
+                            completed.append(controller.state)
+                            raise failure
+                        if command == 'choose': window._choose_backup_archive = invalidate
+                        elif command == 'assess': controller.refresh_backup = invalidate
+                        else: controller.select_backup_archive = invalidate
+                        with self.assertRaises(error_type) as caught: window.backup_command(command)
+                        self.assertIs(caught.exception, failure)
+                        self.assertFalse(window._backup_busy)
+                        self.assertEqual(controller.state, completed[0])
+                        self.assertFalse(controller.backup_state['selected'])
+                        self.assertEqual(calls, [command])
+                    finally: fixture.doCleanups()
+
+    def test_chooser_cancellation_retains_selection_after_guard_recovery(self):
+        self.real_controller_window(Mock(return_value=BackupEvidence()))
+        self.controller.select_backup_archive('selected.zip')
+        self.controller.refresh_backup()
+        before = self.controller.state
+        self.window._choose_backup_archive = Mock(return_value=None)
+        self.window.backup_command('choose')
+        self.assertFalse(self.window._backup_busy)
+        self.assertEqual(self.controller.state, before)
+        self.window._choose_backup_archive.assert_called_once_with()
+
+    def test_duplicate_stable_ids_block_analytics_but_embedded_backup_is_ignored(self):
         self.ready()
         model = self.controller.data['presentation']
         model['vehicles'].append(deepcopy(model['vehicles'][0]))
@@ -1099,8 +1336,8 @@ class TestDashboardGUI(unittest.TestCase):
         model['vehicles'].pop()
         model['backup_health']['availability'] = 'Available'
         self.window.render()
-        self.assertIn('Backup health must remain unavailable', self.window.notice.get())
-        self.assert_disabled()
+        self.assertIn('Ready', self.window.notice.get())
+        self.assertIn('Backup inspection unavailable', self.window.panels['backup'].content)
 
 if __name__ == '__main__':
     unittest.main()

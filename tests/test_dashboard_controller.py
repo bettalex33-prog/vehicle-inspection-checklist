@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from dashboard_controller import DashboardController, DashboardControllerError
+from test_dashboard_model import backup_report
 
 DAY = date(2026, 10, 31)
 PID, OTHER = 'stable-1', 'stable-2'
@@ -56,6 +57,316 @@ class Factory:
 def project(facts, checklist, *, scope_profile_id):
     return dict(scope_profile_id=scope_profile_id, facts=facts,
                 shared_inspection_progress=checklist)
+
+
+class BackupEvidence:
+    def __init__(self):
+        self.report = backup_report()
+        self.hook = None
+        self.checks = 0
+
+    @property
+    def model(self):
+        return deepcopy(self.report)
+
+    def revalidate(self):
+        self.checks += 1
+        if self.hook: self.hook()
+
+
+class TestDashboardBackupController(unittest.TestCase):
+    def make_controller(self):
+        self.evidence = BackupEvidence()
+        self.factory_calls = []
+        def factory(path):
+            self.factory_calls.append(path)
+            return self.evidence
+        return DashboardController(Factory(), as_of=DAY, projector=project,
+                                   backup_assessment_factory=factory)
+
+    def assessed(self):
+        controller = self.make_controller()
+        controller.select_backup_archive('/private/secret/archive.zip')
+        controller.refresh_backup()
+        return controller
+
+    def test_unavailable_initial_selection_replacement_clear_and_no_reads(self):
+        omitted = DashboardController(Factory(), as_of=DAY)
+        self.assertEqual(omitted.backup_state['status'], 'unavailable')
+        with self.assertRaises(DashboardControllerError): omitted.select_backup_archive('archive.zip')
+        controller = self.make_controller()
+        self.assertEqual(controller.backup_state['status'], 'no_selection')
+        for path in ('/private/secret/archive.zip', '/another/archive.zip'):
+            controller.select_backup_archive(path)
+            self.assertEqual(controller.backup_state['status'], 'required')
+            self.assertEqual(self.factory_calls, [])
+            self.assertEqual(self.evidence.checks, 0)
+            self.assertNotIn(path, str(controller.state))
+        controller.refresh_backup()
+        self.assertEqual(self.factory_calls, ['/another/archive.zip'])
+        controller.select_backup_archive('/another/archive.zip')
+        self.assertFalse(controller.backup_state['healthy'])
+        self.assertIsNone(controller._backup.publication.assessment)
+        controller.select_backup_archive(None)
+        self.assertFalse(controller.backup_state['selected'])
+        self.assertFalse(controller.backup_state['action_ready'])
+        self.assertEqual(controller.backup_state['stores'], [])
+
+    def test_publications_revisions_generations_and_availability_are_independent(self):
+        controller = self.make_controller()
+        analytical = controller._session
+        controller.select_backup_archive('archive.zip'); controller.refresh_backup()
+        self.assertIs(controller._session, analytical)
+        self.assertEqual(controller.backup_state['revision'], 2)
+        self.assertEqual(controller.backup_state['publication_generation'], 1)
+        backup = controller._backup
+        controller.refresh()
+        controller.select_scope(PID); controller.set_explicit_mileage(100)
+        controller.set_evaluation_date(date(2026, 10, 30)); controller.set_cost_bounds('2026-01-01', None)
+        self.assertIs(controller._backup, backup)
+        controller.refresh()
+        controller.perform_action(lambda panel: None)
+        self.assertIs(controller._backup, backup)
+        # Analytical failure does not gate the independent backup factory.
+        controller._capture_factory.capture.failure = 'source changed'
+        with self.assertRaises(DashboardControllerError): controller.refresh()
+        controller.refresh_backup()
+        self.assertEqual(controller.backup_state['publication_generation'], 2)
+        analytical = controller._session
+        controller._backup_factory = lambda path: (_ for _ in ()).throw(ValueError('/secret/error'))
+        with self.assertRaisesRegex(DashboardControllerError, '^Backup assessment failed; assess again.$'):
+            controller.refresh_backup()
+        self.assertIs(controller._session, analytical)
+        self.assertEqual(controller.backup_state['status'], 'error')
+        self.assertEqual(controller.backup_state['publication_generation'], 2)
+        controller._capture_factory.capture.failure = None
+        controller.refresh(); controller.perform_action(lambda p: None)
+
+    def test_backup_consumer_gets_owned_sanitized_data_after_exact_revalidation(self):
+        controller = self.assessed()
+        before = controller.backup_state
+        checks = self.evidence.checks
+        def consume(panel):
+            self.assertEqual(self.evidence.checks, checks + 1)
+            self.assertNotIn('/private', str(panel))
+            panel['stores'].clear()
+            return 42
+        self.assertEqual(controller.perform_backup_action(consume), 42)
+        self.assertEqual(controller.backup_state, before)
+
+    def test_revalidation_failure_only_marks_backup_stale(self):
+        controller = self.assessed(); controller.refresh()
+        analytical = controller._session
+        def stale(): raise ValueError('/private/secret/changed')
+        self.evidence.hook = stale
+        calls = []
+        with self.assertRaisesRegex(DashboardControllerError, '^Backup evidence stale; assess again.$'):
+            controller.perform_backup_action(calls.append)
+        self.assertEqual(calls, [])
+        self.assertIs(controller._session, analytical)
+        self.assertFalse(controller.backup_state['healthy'])
+        self.assertFalse(controller.backup_state['action_ready'])
+        self.assertEqual(controller.backup_state['status'], 'stale')
+        controller.perform_action(lambda panel: None)
+
+    def test_reentrant_operations_reject_outer_backup_consumer(self):
+        for operation in ('selection', 'refresh', 'action', 'invalidation'):
+            with self.subTest(operation=operation):
+                controller = self.assessed()
+                calls = []
+                def hook():
+                    try:
+                        if operation == 'selection': controller.select_backup_archive('replacement.zip')
+                        elif operation == 'refresh': controller.refresh_backup()
+                        elif operation == 'action': controller.perform_backup_action(calls.append)
+                        else: controller.invalidate()
+                    except DashboardControllerError: pass
+                self.evidence.hook = hook
+                with self.assertRaises(DashboardControllerError): controller.perform_backup_action(calls.append)
+                self.assertEqual(calls, [])
+                self.assertFalse(controller.backup_state['healthy'])
+                if operation == 'invalidation': self.assertFalse(controller.backup_state['selected'])
+
+    def test_reentrancy_during_assessment_cannot_publish_or_resurrect_selection(self):
+        for operation in ('selection', 'refresh', 'action', 'invalidation'):
+            controller = self.assessed()
+            generation = controller.backup_state['publication_generation']
+            def factory(path):
+                try:
+                    if operation == 'selection': controller.select_backup_archive('new.zip')
+                    elif operation == 'refresh': controller.refresh_backup()
+                    elif operation == 'action': controller.perform_backup_action(lambda p: None)
+                    else: controller.invalidate()
+                except DashboardControllerError: pass
+                return self.evidence
+            controller._backup_factory = factory
+            with self.assertRaises(DashboardControllerError): controller.refresh_backup()
+            self.assertEqual(controller.backup_state['publication_generation'], generation)
+            self.assertFalse(controller.backup_state['healthy'])
+            if operation == 'invalidation': self.assertFalse(controller.backup_state['selected'])
+
+    def test_invalidation_clears_all_evidence_without_reading(self):
+        controller = self.assessed()
+        checks, calls = self.evidence.checks, list(self.factory_calls)
+        controller.invalidate()
+        state = controller.backup_state
+        self.assertEqual(state['status'], 'no_selection')
+        self.assertFalse(state['healthy']); self.assertFalse(state['selected'])
+        self.assertEqual(state['stores'], [])
+        self.assertIsNone(controller._backup.publication.assessment)
+        self.assertIsNone(controller._backup.publication.presentation)
+        self.assertEqual(self.evidence.checks, checks)
+        self.assertEqual(self.factory_calls, calls)
+
+    def test_invalid_missing_unsupported_evidence_is_not_actionable(self):
+        for kind in ('missing', 'invalid', 'unsupported'):
+            controller = self.assessed()
+            report = self.evidence.report
+            report.update(healthy=False, coverage='invalid', availability='Invalid')
+            report['archive']['payload_valid'] = False
+            if kind == 'missing':
+                report.update(availability='Unavailable', coverage='unknown')
+                report['archive']['presence'] = 'Missing'
+            if kind == 'unsupported': report['archive']['compatible'] = False
+            controller.refresh_backup()
+            self.assertEqual(controller.backup_state['classification'], kind)
+            with self.assertRaises(DashboardControllerError): controller.perform_backup_action(lambda p: self.fail())
+
+    def test_cancellation_at_each_successful_assessment_line_rolls_back_exact_state(self):
+        visited = set()
+        def collect(frame, event, arg):
+            if frame.f_code is DashboardController.refresh_backup.__code__ and event == 'line':
+                visited.add(frame.f_lineno)
+            return collect
+        controller = self.assessed()
+        sys.settrace(collect)
+        try: controller.refresh_backup()
+        finally: sys.settrace(None)
+        for line in sorted(visited):
+            for error_type in (KeyboardInterrupt, SystemExit):
+                with self.subTest(line=line, error_type=error_type):
+                    controller = self.assessed()
+                    before, analytical = controller._backup, controller._session
+                    failure = error_type('cancel')
+                    fired = False
+                    def interrupt(frame, event, arg):
+                        nonlocal fired
+                        if not fired and event == 'line' and frame.f_code is DashboardController.refresh_backup.__code__ and frame.f_lineno == line:
+                            fired = True
+                            raise failure
+                        return interrupt
+                    sys.settrace(interrupt)
+                    try:
+                        with self.assertRaises(error_type) as caught: controller.refresh_backup()
+                    finally: sys.settrace(None)
+                    self.assertIs(caught.exception, failure)
+                    self.assertIs(controller._backup, before)
+                    self.assertIs(controller._session, analytical)
+                    self.assertFalse(controller.backup_state['loading'])
+
+    def test_backup_callback_cancellation_and_invalidation_preserve_guards(self):
+        for invalidate in (False, True):
+            controller = self.assessed()
+            before = controller._backup
+            failure = KeyboardInterrupt('consumer')
+            def consume(panel):
+                if invalidate: controller.invalidate()
+                raise failure
+            with self.assertRaises(KeyboardInterrupt) as caught: controller.perform_backup_action(consume)
+            self.assertIs(caught.exception, failure)
+            self.assertFalse(controller.backup_state['action_in_progress'])
+            if invalidate: self.assertFalse(controller.backup_state['selected'])
+            else: self.assertIs(controller._backup, before)
+
+    def test_action_cancellation_at_each_successful_boundary_restores_activity(self):
+        methods = (DashboardController.perform_backup_action, DashboardController._consume_backup)
+        codes = {method.__code__ for method in methods}
+        visited = set()
+        def collect(frame, event, arg):
+            if frame.f_code in codes and event == 'line': visited.add((frame.f_code, frame.f_lineno))
+            return collect
+        controller = self.assessed()
+        sys.settrace(collect)
+        try: controller.perform_backup_action(lambda p: None)
+        finally: sys.settrace(None)
+        for code, line in sorted(visited, key=lambda item: item[1]):
+            for invalidate in (False, True):
+                with self.subTest(line=line, invalidate=invalidate):
+                    controller = self.assessed()
+                    analytical = controller._session
+                    calls = []
+                    failure = KeyboardInterrupt('boundary')
+                    fired = False
+                    def interrupt(frame, event, arg):
+                        nonlocal fired
+                        if not fired and event == 'line' and frame.f_code is code and frame.f_lineno == line:
+                            fired = True
+                            raise failure
+                        return interrupt
+                    def consume(panel):
+                        calls.append(panel)
+                        if invalidate: controller.invalidate()
+                    sys.settrace(interrupt)
+                    try:
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            controller.perform_backup_action(consume)
+                    finally: sys.settrace(None)
+                    self.assertIs(caught.exception, failure)
+                    self.assertFalse(controller.backup_state['action_in_progress'])
+                    self.assertFalse(controller.backup_state['loading'])
+                    self.assertLessEqual(len(calls), 1)
+                    if invalidate and calls:
+                        self.assertFalse(controller.backup_state['selected'])
+                    else: self.assertIs(controller._session, analytical)
+
+    def test_cancellation_from_model_projection_and_revalidation_keeps_prior_publication(self):
+        for stage in ('factory', 'model', 'projection', 'revalidate'):
+            controller = self.assessed()
+            before, analytical = controller._backup, controller._session
+            failure = SystemExit('cancel')
+            def cancel(*args, **kwargs): raise failure
+            from contextlib import ExitStack
+            with ExitStack() as stack:
+                if stage == 'factory': controller._backup_factory = cancel
+                elif stage == 'model':
+                    from unittest.mock import PropertyMock
+                    stack.enter_context(patch.object(BackupEvidence, 'model', new_callable=PropertyMock, side_effect=failure))
+                elif stage == 'projection': stack.enter_context(patch('dashboard_controller.build_backup_panel', side_effect=failure))
+                else: self.evidence.hook = cancel
+                with self.assertRaises(SystemExit) as caught: controller.refresh_backup()
+            self.assertIs(caught.exception, failure)
+            self.assertIs(controller._backup, before)
+            self.assertIs(controller._session, analytical)
+            self.assertFalse(controller.backup_state['loading'])
+
+    def test_real_temporary_writer_capture_freshness_and_preservation(self):
+        from test_backup_health import TestBackupHealth
+        import backup_health
+        import data_backup
+        fixture = TestBackupHealth()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        # Explicit maintenance is supplied by the fixture, with no mapping fallback.
+        self.assertIsNotNone(fixture.paths.maintenance)
+        archive = data_backup.create_backup(fixture.paths, fixture.root,
+            timestamp=datetime.fromisoformat('2026-10-22T12:00:00+00:00'))
+        controller = DashboardController(Factory(), as_of=DAY, projector=project,
+            backup_assessment_factory=lambda selected: backup_health.assess_backup_health(selected, paths=fixture.paths))
+        controller.select_backup_archive(archive)
+        before = fixture.tree()
+        controller.refresh_backup()
+        self.assertTrue(controller.backup_state['healthy'])
+        controller.perform_backup_action(lambda p: None)
+        self.assertEqual(fixture.tree(), before)
+        fixture.paths.profiles.write_bytes(b'{"schema_version": 1, "profiles": []} ')
+        with self.assertRaises(DashboardControllerError): controller.perform_backup_action(lambda p: self.fail())
+        self.assertEqual(controller.backup_state['status'], 'stale')
+        controller.refresh_backup()
+        self.assertEqual(controller.backup_state['classification'], 'changed')
+        archive.write_bytes(archive.read_bytes() + b'changed')
+        with self.assertRaises(DashboardControllerError): controller.perform_backup_action(lambda p: self.fail())
+        controller.invalidate()
+        self.assertFalse(controller.backup_state['selected'])
 
 
 class TestDashboardController(unittest.TestCase):
@@ -257,6 +568,8 @@ class TestDashboardController(unittest.TestCase):
         self.assertGreater(repeated['revision'], state['revision'])
         self.assertEqual(repeated['publication_generation'], state['publication_generation'])
         repeated['revision'] = state['revision']
+        self.assertGreater(repeated['backup_health']['revision'], state['backup_health']['revision'])
+        repeated['backup_health']['revision'] = state['backup_health']['revision']
         self.assertEqual(repeated, state)
         self.assertEqual(self.factory.capture.checks, checks)
         self.assertEqual(len(self.factory.calls), 1)

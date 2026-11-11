@@ -5,10 +5,93 @@ import unittest
 from unittest.mock import patch
 
 from checklist import create_default_data
-from dashboard_model import build_dashboard_model
+from dashboard_model import build_dashboard_model, build_backup_panel
 from fleet_dashboard import STATUSES
 from test_fleet_dashboard import PID, OTHER, profile, task, service
 from test_maintenance_insights import AS_OF, build, positive_task
+
+
+def backup_report():
+    """Owned synthetic engine facts, including private evidence to exclude."""
+    names = ('checklist_data.json', 'inspection_history.json',
+             'maintenance_schedule.json', 'vehicle_profiles.json')
+    return dict(availability='Available', coverage='complete', coverage_reason='all_stores_match',
+        unavailable_reason=None, healthy=True, archive=dict(path='/private/secret/archive.zip',
+            presence='Present', zip_valid=True, members_safe=True, manifest_valid=True,
+            compatible=True, checksum_valid=True, payload_valid=True, release='1.9.0',
+            created_at='2026-10-22T12:34:56.123456789Z', validation_reason='/private/secret/error'),
+        stores=[dict(name=name, path='/private/secret/' + name, archived=True,
+            archive_checksum_valid=True, current_presence='Present', current_readability='Readable',
+            current_reason=None, exact_byte_match=True, match_reason='exact_bytes_match') for name in names])
+
+
+class TestBackupPanel(unittest.TestCase):
+    def test_session_state_matrix_drops_old_health_and_private_evidence(self):
+        for status in ('unavailable', 'no_selection', 'required', 'loading', 'stale', 'error'):
+            panel = build_backup_panel(backup_report(), status=status)
+            self.assertEqual(panel['classification'], status)
+            self.assertFalse(panel['healthy'])
+            self.assertEqual(panel['stores'], [])
+            self.assertNotIn('/private', str(panel))
+
+    def test_assessment_classifications_and_combined_partial_different(self):
+        for expected in ('complete', 'missing', 'invalid', 'unsupported', 'partial', 'changed', 'unknown'):
+            with self.subTest(expected=expected):
+                report = backup_report()
+                if expected != 'complete': report['healthy'] = False
+                if expected == 'missing':
+                    report.update(availability='Unavailable', coverage='unknown')
+                    report['archive']['presence'] = 'Missing'
+                elif expected in ('invalid', 'unsupported'):
+                    report.update(availability='Invalid', coverage='invalid')
+                    report['archive']['payload_valid'] = False
+                    if expected == 'unsupported':
+                        report['archive'].update(compatible=False,
+                            compatibility_reason='unsupported_schema_application_or_release')
+                elif expected == 'partial':
+                    report['coverage'] = 'partial'
+                    report['stores'][0].update(archived=False, exact_byte_match=None, match_reason='not_archived')
+                elif expected == 'changed':
+                    report['coverage'] = 'changed'
+                    report['stores'][0].update(archived=False, exact_byte_match=None)
+                    report['stores'][1].update(exact_byte_match=False, match_reason='different_bytes')
+                elif expected == 'unknown':
+                    report.update(availability='Unavailable', coverage='unknown')
+                    report['stores'][0].update(current_readability='Unreadable', exact_byte_match=None,
+                                              current_reason='os_error_13')
+                panel = build_backup_panel(report, status='assessed')
+                self.assertEqual(panel['classification'], expected)
+                self.assertEqual(panel['healthy'], expected == 'complete')
+                if expected == 'changed':
+                    self.assertTrue(panel['partial']); self.assertTrue(panel['differs'])
+                if expected == 'unknown': self.assertEqual(panel['stores'][0]['current_reason'], 'os_error_13')
+
+    def test_projection_is_allowlisted_sorted_and_independently_owned(self):
+        report = backup_report()
+        report['stores'].reverse()
+        report['archive']['read_reason'] = '/private/secret/diagnostic'
+        report['archive']['created_at'] = '/private/secret/timestamp'
+        report['archive']['release'] = '/private/secret/release'
+        report['stores'][0]['match_reason'] = '/private/secret/match'
+        before = deepcopy(report)
+        first = build_backup_panel(report, status='assessed')
+        self.assertNotIn('/private', str(first))
+        self.assertEqual(report, before)
+        self.assertEqual([r['name'] for r in first['stores']], sorted(r['name'] for r in report['stores']))
+        second = build_backup_panel(report, status='assessed')
+        self.assertEqual(first, second)
+        first['stores'][0]['archived'] = False
+        self.assertTrue(second['stores'][0]['archived'])
+        self.assertEqual(report, before)
+
+    def test_health_requires_every_validation_and_exact_current_store(self):
+        for key in ('zip_valid', 'members_safe', 'manifest_valid', 'compatible', 'checksum_valid', 'payload_valid'):
+            report = backup_report(); report['archive'][key] = False
+            self.assertFalse(build_backup_panel(report, status='assessed')['healthy'])
+        for field, value in (('archived', False), ('exact_byte_match', None),
+                             ('current_presence', 'Missing'), ('current_readability', 'Unreadable')):
+            report = backup_report(); report['stores'][0][field] = value
+            self.assertFalse(build_backup_panel(report, status='assessed')['healthy'])
 
 
 class TestDashboardModel(unittest.TestCase):
@@ -22,8 +105,7 @@ class TestDashboardModel(unittest.TestCase):
         self.assertEqual(result['service_history'], [])
         self.assertIsNone(result['service_cost_summary']['total_cost_cents'])
         self.assertEqual(result['shared_inspection_progress']['completed'], 0)
-        self.assertEqual(result['backup_health'], dict(availability='Unavailable',
-            unavailable_reason='backup_inspection_not_implemented'))
+        self.assertEqual(result['backup_health'], build_backup_panel())
 
     def test_missing_checklist_is_not_zero(self):
         progress = self.project()['shared_inspection_progress']
