@@ -66,7 +66,8 @@ class TestChecklistGUI(unittest.TestCase):
                 complete.assert_called_once_with(item_id)
         buttons = {call.kwargs["text"]: call.kwargs["command"]
                    for call in self.widgets["Button"].call_args_list}
-        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup", "Maintenance…", "Fleet Dashboard…", "Maintenance Insights…"})
+        self.assertEqual(set(buttons), {"Refresh", "Reset All", "Close", "Save Inspection", "History", "Edit Findings…", "New Profile…", "Edit Profile…", "Delete Profile…", "Reload Profiles", "Backup All Data", "Restore Backup", "Maintenance…", "Fleet Dashboard…", "Maintenance Insights…", "Open Dashboard"})
+        self.assertEqual(buttons["Open Dashboard"], self.app.open_optional_dashboard)
         self.assertEqual(buttons["Save Inspection"], self.app.save_inspection)
         self.assertEqual(buttons["History"], self.app.open_history)
         self.assertEqual(buttons["Refresh"], self.app.refresh)

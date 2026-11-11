@@ -50,6 +50,7 @@ class ChecklistApp:
         self.dashboard_windows = []
         self.insights_windows = []
         self.history_windows = []
+        self.optional_dashboard = None
         self.profiles = []
         self.active_profile = None
         self.profiles_available = False
@@ -111,6 +112,7 @@ class ChecklistApp:
             ("History", self.open_history),
             ("Maintenance…", self.open_maintenance),
             ("Fleet Dashboard…", self.open_dashboard),
+            ("Open Dashboard", self.open_optional_dashboard),
             ("Maintenance Insights…", self.open_insights),
             ("Refresh", self.refresh),
             ("Reset All", self.reset_all),
@@ -225,6 +227,18 @@ class ChecklistApp:
         self.dashboard_windows.append(FleetDashboardWindow(
             self.root, self.maintenance_path, self.profiles_path,
             runtime_paths=tuple(self.runtime_paths().mapping().values()), open_task=self.open_dashboard_task))
+
+    def open_optional_dashboard(self):
+        try:
+            if self.optional_dashboard is None:
+                # Optional modules are not required for existing app startup.
+                from dashboard_app import DashboardLauncher
+                self.optional_dashboard = DashboardLauncher(self.root, self.runtime_paths())
+            return self.optional_dashboard.open()
+        except Exception:
+            messagebox.showerror("Open Dashboard",
+                "Dashboard is unavailable. Check that the optional dashboard modules are installed.",
+                parent=self.root)
 
     def open_dashboard_task(self, task_id):
         window = MaintenanceWindow(self.root, self.maintenance_path, self.profiles_path)
