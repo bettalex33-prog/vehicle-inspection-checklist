@@ -2,6 +2,66 @@
 
 A simple command-line tool for tracking vehicle maintenance inspections using only Python standard library modules. No installation or external dependencies required.
 
+## v2.0.0 optional Dashboard
+
+From the graphical checklist, click **Open Dashboard** and enter an evaluation
+date (YYYY-MM-DD). The dashboard opens as a child window and starts without
+reading the data stores. Click **Refresh** in the dashboard to read the current
+checklist, inspection history, vehicle profiles, and maintenance schedule. It
+shows shared inspection progress, maintenance status, mileage forecasts, service
+costs, recent service history, and data quality. There is no background
+monitoring. Missing or invalid sources can prevent a current view, and stale
+results are marked as needing refresh.
+
+After the first refresh, use **Vehicle scope** to choose all vehicles or an
+existing profile, then refresh to apply the choice. Profiles are identified by
+stable IDs, so profiles with the same name remain distinct. To supply current
+mileage, select one existing profile, enter a nonnegative whole number in
+**Explicit current mileage (session only)**, and refresh. The dashboard applies
+that value to the selected profile only. It never infers or saves the value.
+Changing vehicle scope clears it, and reopening the dashboard starts a new
+session. Inspection progress remains shared across vehicle scopes.
+
+In **Backup health**, **Choose archive…** selects one ZIP for the session.
+**Assess selected archive** validates it and compares the archived bytes with
+the current stores. This assessment is independent of the dashboard's
+**Refresh**. **Clear selection** discards both the selected archive and its
+assessment. The backup-health panel and its diagnostics do not display backup
+paths. Coverage describes which current store bytes match the archive. It
+does not establish data correctness or long-term recoverability.
+
+The dashboard is passive and read-only. It does not create or edit stores,
+create backups, extract archives, or export reports. **No restore action
+exists in the dashboard.** The established backup and restore controls remain
+in the main checklist. Closing the dashboard leaves the checklist running.
+Closing the main checklist closes its child windows. A normal packaged Close
+returns exit status 0.
+
+### Local macOS package
+
+The v2.0.0 bundle runs natively on Apple Silicon with macOS 15.5 or later and
+requires ARM64 Python 3.15 with Tcl/Tk 9 Aqua at the framework path
+`/Library/Frameworks/Python.framework/Versions/3.15/bin/python3`.
+Build from a trusted local checkout with `python3 -I -B build_macos_app.py`
+using that runtime. The builder copies an explicit allowlist of production
+modules, the launcher, and the plist. The bundle uses the installed runtime
+and the existing separate Application Support store. It remains a local launcher.
+The CLI and shell launchers have no separate product-version output.
+
+Python 3.10 remains supported for source execution and tests. GUI modules and
+their tests require tkinter. The complete macOS development test matrix also
+requires the framework Python 3.15 runtime above, even when Python 3.10 runs
+the suite. Only the translated-launch regression test requires Rosetta. The
+packaged application runs natively on ARM64 without Rosetta.
+
+Backup manifests retain version 1 and the `1.9.0` compatibility label for newly
+created backups. Runtime paths and persistence schemas are unchanged.
+
+See the [v2.0.0 release notes](CHANGELOG.md) for the release inventory and
+validation. The historical v1.9.0 notes below preserve the original roadmap.
+Native app identity, a custom icon, a bundled runtime, signing, notarization,
+and distribution are outside this release.
+
 ## Fleet Dashboard and Maintenance Alerts (v1.7.0)
 
 Open **Fleet Dashboard…** from the checklist. The dashboard is read-only: it does

@@ -162,7 +162,7 @@ class TestMacOSPackaging(unittest.TestCase):
             'maintenance_schedule.json', 'backups/backup.zip', 'tests/test_fixture.py',
             '__pycache__/dashboard_app.cpython-310.pyc', 'logs/startup.log',
             'exports/history.csv', '.git/HEAD', 'tmp/dashboard_fixture.json',
-            'temporary_fixture.py',
+            'temporary_fixture.py', '.aws/credentials', '.env',
         ):
             path = source / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,7 +174,8 @@ class TestMacOSPackaging(unittest.TestCase):
 
     def test_plist_local_release(self):
         info = plistlib.loads((self.bundle / 'Contents/Info.plist').read_bytes())
-        self.assertEqual(info['CFBundleShortVersionString'], '1.9.0')
+        self.assertEqual(info['CFBundleShortVersionString'], '2.0.0')
+        self.assertEqual(info['CFBundleVersion'], '2.0.0')
         self.assertEqual(info['CFBundleExecutable'], 'VehicleInspectionChecklist')
         self.assertEqual(info['LSMinimumSystemVersion'], '15.5')
         self.assertNotIn('LSUIElement', info)
