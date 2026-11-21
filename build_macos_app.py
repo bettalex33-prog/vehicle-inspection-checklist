@@ -1,4 +1,7 @@
-"""Build a local Apple Silicon launcher bundle using only explicit code inputs."""
+"""Build a local Apple Silicon launcher bundle from a trusted local checkout.
+
+The builder does not protect against concurrent hostile mutation of the checkout.
+"""
 from pathlib import Path
 import argparse
 import shutil
@@ -10,6 +13,8 @@ PRODUCTION_FILES = (
     "maintenance_exports.py", "fleet_dashboard.py", "fleet_dashboard_gui.py",
     "fleet_dashboard_exports.py", "maintenance_insights.py", "maintenance_insights_sources.py",
     "maintenance_insights_gui.py", "maintenance_insights_exports.py",
+    "dashboard_app.py", "dashboard_gui.py", "dashboard_controller.py",
+    "dashboard_model.py", "dashboard_sources.py", "backup_health.py",
 )
 
 
