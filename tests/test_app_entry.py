@@ -1,4 +1,6 @@
+from contextlib import contextmanager
 import tempfile
+import tkinter
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -7,6 +9,10 @@ from application_paths import packaged_paths
 from data_backup import create_backup
 from checklist import create_default_data
 import json
+
+
+ALREADY_DESTROYED = 'cannot invoke "destroy" command: application has been destroyed'
+
 
 class TestAppEntry(unittest.TestCase):
     def setUp(self):
@@ -138,6 +144,90 @@ class TestAppEntry(unittest.TestCase):
         app.assert_not_called()
         root.mainloop.assert_not_called()
         root.destroy.assert_called_once()
+
+    @contextmanager
+    def packaged_main(self, root):
+        import gui
+
+        run = entry.run
+        with patch.object(entry.sys, 'platform', 'darwin'), \
+             patch.object(entry.platform, 'machine', return_value='arm64'), \
+             patch.object(entry.sys, 'executable', entry.RUNTIME), \
+             patch.object(tkinter, 'Tk', return_value=root), \
+             patch.object(entry, 'prepare_data', return_value=True), \
+             patch.object(gui, 'ChecklistApp') as app, \
+             patch.object(entry, 'run', side_effect=lambda: run(home=self.home)), \
+             patch.object(entry, 'native_error') as alert:
+            yield app, alert
+
+    def test_close_destroys_root_and_final_cleanup_is_successful(self):
+        root = MagicMock()
+        root.destroy.side_effect = [None, tkinter.TclError(ALREADY_DESTROYED)]
+        root.mainloop.side_effect = root.destroy
+
+        with self.packaged_main(root) as (_, alert):
+            self.assertEqual(entry.main(), 0)
+            alert.assert_not_called()
+        self.assertEqual(root.destroy.call_count, 2)
+
+    def test_repeated_cleanup_after_close_is_safe(self):
+        root = MagicMock()
+        root.destroy.side_effect = [None, tkinter.TclError(ALREADY_DESTROYED),
+                                    tkinter.TclError(ALREADY_DESTROYED)]
+        root.destroy()
+
+        entry.destroy_root(root)
+        entry.destroy_root(root)
+
+        self.assertEqual(root.destroy.call_count, 3)
+
+    def test_main_close_with_dashboard_child_destroys_child_once(self):
+        Tk = tkinter.Tk
+        root, dashboard = MagicMock(), MagicMock()
+        root.children = {'dashboard': dashboard}
+        dashboard.destroy.side_effect = root.children.clear
+        root.tk.call.side_effect = [None, tkinter.TclError(ALREADY_DESTROYED)]
+        root.destroy.side_effect = lambda: Tk.destroy(root)
+        root.mainloop.side_effect = root.destroy
+
+        with self.packaged_main(root) as (_, alert):
+            self.assertEqual(entry.main(), 0)
+            alert.assert_not_called()
+        dashboard.destroy.assert_called_once_with()
+        self.assertEqual(root.children, {})
+
+    def test_unrelated_destroy_error_still_fails(self):
+        for error in (tkinter.TclError('bad window path name "."'),
+                      RuntimeError(ALREADY_DESTROYED)):
+            with self.subTest(error=error):
+                root = MagicMock()
+                root.destroy.side_effect = error
+                with self.assertRaises(type(error)) as raised:
+                    entry.destroy_root(root)
+                self.assertIs(raised.exception, error)
+                with self.packaged_main(root) as (_, alert):
+                    self.assertEqual(entry.main(), 1)
+                    alert.assert_called_once()
+
+    def test_mainloop_failure_still_fails_after_already_destroyed_cleanup(self):
+        root = MagicMock()
+        root.mainloop.side_effect = RuntimeError('loop failed')
+        root.destroy.side_effect = tkinter.TclError(ALREADY_DESTROYED)
+
+        with self.packaged_main(root) as (_, alert):
+            self.assertEqual(entry.main(), 1)
+            self.assertIn('RuntimeError', alert.call_args.args[0])
+        root.destroy.assert_called_once_with()
+
+    def test_startup_failure_still_fails_and_cleans_up_root(self):
+        root = MagicMock()
+
+        with self.packaged_main(root) as (app, alert):
+            app.side_effect = ValueError('construction failed')
+            self.assertEqual(entry.main(), 1)
+            self.assertIn('ValueError', alert.call_args.args[0])
+        root.mainloop.assert_not_called()
+        root.destroy.assert_called_once_with()
 
     def test_known_startup_alerts_are_specific_and_safe(self):
         for code in ('architecture', 'runtime', 'duplicate'):

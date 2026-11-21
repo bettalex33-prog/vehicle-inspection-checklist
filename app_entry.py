@@ -80,6 +80,17 @@ def prepare_data(root, paths, dialogs, picker):
     return True
 
 
+def destroy_root(root):
+    from tkinter import TclError
+
+    try:
+        root.destroy()
+    except TclError as error:
+        # The main Close button can destroy the root before mainloop returns.
+        if str(error) != 'cannot invoke "destroy" command: application has been destroyed':
+            raise
+
+
 def run(*, home=None):
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise StartupFailure("architecture")
@@ -99,7 +110,7 @@ def run(*, home=None):
             root.deiconify()
             root.mainloop()
         finally:
-            root.destroy()
+            destroy_root(root)
 
 
 def main():
