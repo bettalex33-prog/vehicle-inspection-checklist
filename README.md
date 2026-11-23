@@ -62,6 +62,67 @@ validation. The historical v1.9.0 notes below preserve the original roadmap.
 Native app identity, a custom icon, a bundled runtime, signing, notarization,
 and distribution are outside this release.
 
+## v2.1.0 standalone macOS development build
+
+The standalone builder is separate from the v2.0 framework launcher. It
+produces an ARM64 one-directory app for Apple Silicon on macOS 15.5 or later.
+The standalone app carries Python, Tcl/Tk Aqua, and its other native runtime
+libraries. It uses the same packaged Application Support directory and
+persistence formats as the framework launcher.
+
+Build from a trusted checkout using the Python.org ARM64 framework
+Python 3.15.0 installation and macOS command-line developer tools. Create
+the build environment and output in a disposable directory outside the checkout.
+
+```bash
+scratch="$(mktemp -d)"
+runtime=/Library/Frameworks/Python.framework/Versions/3.15/bin/python3
+lock=packaging/macos/standalone-build-requirements.txt
+
+/usr/bin/arch -arm64 "$runtime" -I -B -m venv "$scratch/venv"
+"$scratch/venv/bin/python" -I -B -m pip --isolated --no-cache-dir download \
+  --index-url https://pypi.org/simple --only-binary=:all: --require-hashes \
+  --dest "$scratch/wheels" -r "$lock"
+"$scratch/venv/bin/python" -I -B -m pip --isolated install \
+  --no-index --find-links "$scratch/wheels" --require-hashes -r "$lock"
+"$scratch/venv/bin/python" -I -B build_macos_standalone.py "$scratch/VehicleInspectionChecklist.app"
+```
+
+The builder does not open the application. It checks that native load paths
+resolve within the app or to macOS system libraries, rejects local build paths
+and absolute Python code filenames, and includes the wheel and runtime notices
+under `Contents/Resources/Notices`. It reports recognized upstream build
+provenance strings separately. PyInstaller applies the ad-hoc signature needed
+for local ARM64 execution. Developer ID signing and notarization are separate
+distribution steps.
+
+PyInstaller reads `base_library.zip` before Python can validate the bundle.
+The runtime checks control which paths the initialized application accepts.
+Pre-interpreter integrity depends on trusting the finished bundle and its
+signature. Ad-hoc signing is for local development. A distributed bundle
+requires Developer ID signing and notarization.
+
+Use a trusted local checkout, pinned toolchain, and build directories that
+other processes do not modify. The builder checks for directory replacement
+and leaves artifacts in place when it cannot prove cleanup or rollback is
+safe. PyInstaller runs in a child process. Publication uses an exclusive
+same-volume rename, with descriptor-relative rollback until verification
+finishes. After a verified publication, the completed output is retained.
+
+Registered descriptors are closed on ordinary exceptions and on cancellation
+after ownership registration and before cleanup begins. Normal builder
+failures clean up unchanged owned scratch directories. Process termination
+closes the process's descriptors. The contract excludes an interruption
+between a native open returning and Python registering ownership, interruption
+inside native close, repeated interruption during cleanup, and arbitrary
+trace-injected exceptions at every bytecode boundary. Close is never retried
+on a descriptor that may already have been reused.
+
+For local validation, use synthetic stores under an isolated HOME. Compare two
+clean builds by path, file hash, permissions, and symlink target. Inspect the
+running app after Dashboard Refresh to verify the loaded Python, Tcl, Tk, and
+other native libraries resolve to the app or macOS system paths.
+
 ## Fleet Dashboard and Maintenance Alerts (v1.7.0)
 
 Open **Fleet Dashboard…** from the checklist. The dashboard is read-only: it does
